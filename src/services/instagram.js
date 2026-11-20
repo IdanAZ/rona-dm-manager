@@ -37,6 +37,90 @@ const MOCK_MEDIA = [
     like_count: 204,
     comments_count: 41,
   },
+  {
+    id: 'mock_media_reel_course',
+    caption: 'קורס הכנה ללידה — מה באמת עושים במפגשים? כתבו "קורס" ואשלח פרטים 💗',
+    media_type: 'VIDEO',
+    media_product_type: 'REELS',
+    media_url: 'https://placehold.co/800x1000/f3d0d8/5a2434?text=Course',
+    thumbnail_url: 'https://placehold.co/800x1000/f3d0d8/5a2434?text=Course',
+    permalink: 'https://www.instagram.com/reel/mock_course/',
+    timestamp: '2026-11-19T18:00:00+0000',
+    like_count: 312,
+    comments_count: 67,
+  },
+  {
+    id: 'mock_media_carousel_bag',
+    caption: 'מה לשים בתיק ללידה? קרוסלה עם הרשימה המלאה 👜',
+    media_type: 'CAROUSEL_ALBUM',
+    media_product_type: 'FEED',
+    media_url: 'https://placehold.co/800x800/ead9c8/4a3428?text=Bag',
+    thumbnail_url: 'https://placehold.co/800x800/ead9c8/4a3428?text=Bag',
+    permalink: 'https://www.instagram.com/p/mock_bag/',
+    timestamp: '2026-11-16T19:30:00+0000',
+    like_count: 188,
+    comments_count: 29,
+  },
+  {
+    id: 'mock_media_image_breath',
+    caption: 'תרגיל נשימה קצר לרגע של לחץ בהריון. שמרו לכן 🌿',
+    media_type: 'IMAGE',
+    media_product_type: 'FEED',
+    media_url: 'https://placehold.co/800x800/dce8dc/2a3c2a?text=Breath',
+    thumbnail_url: 'https://placehold.co/800x800/dce8dc/2a3c2a?text=Breath',
+    permalink: 'https://www.instagram.com/p/mock_breath/',
+    timestamp: '2026-11-11T08:00:00+0000',
+    like_count: 94,
+    comments_count: 11,
+  },
+  {
+    id: 'mock_media_reel_qa',
+    caption: 'שאלות שאתן שואלות אותי שוב ושוב לפני הלידה ✨',
+    media_type: 'VIDEO',
+    media_product_type: 'REELS',
+    media_url: 'https://placehold.co/800x1000/e8d5f0/3a2048?text=Q%26A',
+    thumbnail_url: 'https://placehold.co/800x1000/e8d5f0/3a2048?text=Q%26A',
+    permalink: 'https://www.instagram.com/reel/mock_qa/',
+    timestamp: '2026-11-08T17:45:00+0000',
+    like_count: 267,
+    comments_count: 52,
+  },
+  {
+    id: 'mock_media_carousel_stages',
+    caption: 'שלושת שלבי הלידה, בשפה פשוטה. כרטיסיה 2 הכי חשובה 🫶',
+    media_type: 'CAROUSEL_ALBUM',
+    media_product_type: 'FEED',
+    media_url: 'https://placehold.co/800x800/f6e4c8/4a3418?text=Stages',
+    thumbnail_url: 'https://placehold.co/800x800/f6e4c8/4a3418?text=Stages',
+    permalink: 'https://www.instagram.com/p/mock_stages/',
+    timestamp: '2026-11-04T16:15:00+0000',
+    like_count: 143,
+    comments_count: 22,
+  },
+  {
+    id: 'mock_media_reel_partner',
+    caption: 'איך בן או בת הזוג יכולים באמת לעזור בלידה',
+    media_type: 'VIDEO',
+    media_product_type: 'REELS',
+    media_url: 'https://placehold.co/800x1000/d8e4f0/203048?text=Partner',
+    thumbnail_url: 'https://placehold.co/800x1000/d8e4f0/203048?text=Partner',
+    permalink: 'https://www.instagram.com/reel/mock_partner/',
+    timestamp: '2026-10-29T18:20:00+0000',
+    like_count: 221,
+    comments_count: 38,
+  },
+  {
+    id: 'mock_media_image_quote',
+    caption: 'את לא צריכה להיות רגועה. את צריכה להיות מלווה.',
+    media_type: 'IMAGE',
+    media_product_type: 'FEED',
+    media_url: 'https://placehold.co/800x800/f0e4dc/4a3028?text=Quote',
+    thumbnail_url: 'https://placehold.co/800x800/f0e4dc/4a3028?text=Quote',
+    permalink: 'https://www.instagram.com/p/mock_quote/',
+    timestamp: '2026-10-22T09:10:00+0000',
+    like_count: 76,
+    comments_count: 7,
+  },
 ];
 
 function accountAuthMode(config, account) {
@@ -346,6 +430,8 @@ function createInstagramClient({ config, db }) {
           name: 'רונה',
           profile_picture_url: '',
           account_type: 'MEDIA_CREATOR',
+          followers_count: 4860,
+          media_count: 128,
         };
       }
       const m = mode || config.authMode || 'facebook';
@@ -810,7 +896,136 @@ function createInstagramClient({ config, db }) {
         return true;
       }
     },
+
+    async getAccountProfile(account) {
+      if (mock || !apiToken(account)) {
+        return {
+          id: account?.ig_user_id || 'mock_ig_rona',
+          username: account?.username || 'rona_demo',
+          name: account?.name || 'רונה',
+          followers_count: 4860,
+          media_count: MOCK_MEDIA.length,
+          website: '',
+          biography: 'מיילדת · קורס הכנה ללידה',
+        };
+      }
+      return graphFetch(
+        graphUrl(config, `/${account.ig_user_id}`, {
+          fields: 'id,username,name,followers_count,media_count,biography,website,profile_picture_url',
+        }, account),
+        { token: apiToken(account) }
+      );
+    },
+
+    async getAccountInsights(account, { since, until, metrics } = {}) {
+      const metricList = metrics || 'reach,views,accounts_engaged,total_interactions,follows_and_unfollows';
+      if (mock || !apiToken(account)) {
+        const names = String(metricList).split(',').map((s) => s.trim()).filter(Boolean);
+        const bases = { reach: 520, views: 890, accounts_engaged: 140, total_interactions: 210, follows_and_unfollows: 8, impressions: 890, profile_views: 60, follower_count: 4800 };
+        const amps = { reach: 80, views: 140, accounts_engaged: 25, total_interactions: 30, follows_and_unfollows: 3, impressions: 140, profile_views: 10, follower_count: 20 };
+        return { data: names.map((n) => mockInsightMetric(n, since, until, bases[n] || 100, amps[n] || 20)) };
+      }
+      const params = {
+        metric: metricList,
+        period: 'day',
+        metric_type: 'total_value',
+      };
+      if (since) params.since = String(since);
+      if (until) params.until = String(until);
+      try {
+        return await graphFetch(
+          graphUrl(config, `/${account.ig_user_id}/insights`, params, account),
+          { token: apiToken(account) }
+        );
+      } catch (err) {
+        // Older or partial permissions: retry without metric_type, then with legacy impressions.
+        const retry = { metric: metricList, period: 'day' };
+        if (since) retry.since = String(since);
+        if (until) retry.until = String(until);
+        try {
+          return await graphFetch(
+            graphUrl(config, `/${account.ig_user_id}/insights`, retry, account),
+            { token: apiToken(account) }
+          );
+        } catch (err2) {
+          const legacy = { ...retry, metric: String(metricList).replace(/\bviews\b/g, 'impressions') };
+          try {
+            return await graphFetch(
+              graphUrl(config, `/${account.ig_user_id}/insights`, legacy, account),
+              { token: apiToken(account) }
+            );
+          } catch (err3) {
+            err3.message = err3.message || err2.message || err.message;
+            throw err3;
+          }
+        }
+      }
+    },
+
+    async getMediaInsights(account, media, { metrics } = {}) {
+      const item = typeof media === 'object' && media ? media : { id: media };
+      const isReel = item.media_product_type === 'REELS' || item.media_type === 'REELS';
+      const metricList = metrics || (isReel
+        ? 'views,reach,likes,comments,saved,shares,total_interactions'
+        : 'views,reach,likes,comments,saved,shares,total_interactions');
+      if (mock || !apiToken(account)) {
+        const likes = Number(item.like_count || 80);
+        const comments = Number(item.comments_count || 10);
+        return {
+          data: [
+            { name: 'views', values: [{ value: likes * 14 }], total_value: { value: likes * 14 } },
+            { name: 'reach', values: [{ value: likes * 9 }], total_value: { value: likes * 9 } },
+            { name: 'likes', values: [{ value: likes }], total_value: { value: likes } },
+            { name: 'comments', values: [{ value: comments }], total_value: { value: comments } },
+            { name: 'total_interactions', values: [{ value: likes + comments }], total_value: { value: likes + comments } },
+          ],
+        };
+      }
+      return graphFetch(
+        graphUrl(config, `/${item.id}/insights`, { metric: metricList }, account),
+        { token: apiToken(account) }
+      );
+    },
+
+    async businessDiscovery(account, username) {
+      const handle = String(username || '').replace(/^@/, '').trim();
+      if (!handle) throw new Error('missing_handle');
+      if (mock || !apiToken(account)) {
+        return {
+          business_discovery: {
+            username: handle,
+            name: handle,
+            followers_count: 2500,
+            media_count: 180,
+            biography: '',
+            website: '',
+            mock: true,
+          },
+        };
+      }
+      return graphFetch(
+        graphUrl(config, `/${account.ig_user_id}`, {
+          fields: `business_discovery.username(${handle}){followers_count,media_count,biography,website,name,profile_picture_url,username}`,
+        }, account),
+        { token: apiToken(account) }
+      );
+    },
   };
+}
+
+
+function mockInsightMetric(name, sinceSec, untilSec, base, amplitude) {
+  const since = (Number(sinceSec) || Math.floor(Date.now() / 1000) - 7 * 86400) * 1000;
+  const until = (Number(untilSec) || Math.floor(Date.now() / 1000)) * 1000;
+  const values = [];
+  let i = 0;
+  for (let t = since; t < until; t += 86400000) {
+    const value = Math.max(0, Math.round(base + amplitude * Math.sin(i / 2) + (i % 3) * 12));
+    values.push({ value, end_time: new Date(t + 86400000).toISOString() });
+    i += 1;
+  }
+  const total = values.reduce((s, v) => s + v.value, 0);
+  return { name, period: 'day', title: name, description: name, values, total_value: { value: total }, id: `mock/${name}` };
 }
 
 function expiresAtFromSeconds(expiresIn) {

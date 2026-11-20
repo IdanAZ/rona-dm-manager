@@ -337,6 +337,239 @@ function createApiRouter({ db, config, instagram, engine }) {
     res.json({ ok: true, media, result, automations: autos });
   });
 
+  const { collectInsights } = require('../services/insights');
+  const { runWeeklySummaries } = require('../services/weeklySummary');
+  const { normalizeLeadStatus, normalizeLeadSource, parseLeadFields } = require('../lib/leads');
+
+  router.get('/insights', requireAccount, async (req, res, next) => {
+    try {
+      const days = Number(req.query.days) === 7 ? 7 : 30;
+      const data = await collectInsights({ db, instagram, account: req.account, days });
+      res.json(data);
+    } catch (err) { next(err); }
+  });
+
+  router.get('/insights/summary', requireAccount, async (req, res, next) => {
+    try {
+      res.json({ summary: await db.getLatestWeeklySummary(req.account.id) });
+    } catch (err) { next(err); }
+  });
+
+  router.post('/insights/summary/run', requireAccount, async (req, res, next) => {
+    try {
+      if (!config.mockMode && config.nodeEnv === 'production') {
+        return res.status(403).json({ error: 'manual_run_disabled' });
+      }
+      const results = await runWeeklySummaries({
+        db, instagram, config, force: true, now: new Date(),
+      });
+      res.json({ ok: true, results, summary: await db.getLatestWeeklySummary(req.account.id) });
+    } catch (err) { next(err); }
+  });
+
+  router.get('/leads', requireAccount, async (req, res, next) => {
+    try {
+      const automationId = req.query.automation_id ? Number(req.query.automation_id) : undefined;
+      const leads = await db.listLeads(req.account.id, { automationId });
+      res.json({ leads });
+    } catch (err) { next(err); }
+  });
+
+  router.post('/leads', requireAccount, async (req, res, next) => {
+    try {
+      const body = req.body || {};
+      const lead = await db.createLead({
+        account_id: req.account.id,
+        automation_id: body.automation_id || null,
+        source: normalizeLeadSource(body.source, 'manual'),
+        status: normalizeLeadStatus(body.status, 'new'),
+        username: body.username || null,
+        igsid: body.igsid || null,
+        comment_id: body.comment_id || null,
+        fields: parseLeadFields(body.fields),
+      });
+      res.json({ lead });
+    } catch (err) { next(err); }
+  });
+
+  router.patch('/leads/:id', requireAccount, async (req, res, next) => {
+    try {
+      const lead = await db.getLead(Number(req.params.id));
+      if (!lead || Number(lead.account_id) !== Number(req.account.id)) {
+        return res.status(404).json({ error: 'lead_not_found' });
+      }
+      const body = req.body || {};
+      const patch = {};
+      if (body.status !== undefined) patch.status = normalizeLeadStatus(body.status, lead.status);
+      if (body.source !== undefined) patch.source = normalizeLeadSource(body.source, lead.source);
+      if (body.username !== undefined) patch.username = body.username;
+      if (body.fields !== undefined) patch.fields = { ...parseLeadFields(lead.fields), ...parseLeadFields(body.fields) };
+      if (body.automation_id !== undefined) patch.automation_id = body.automation_id;
+      const updated = await db.updateLead(lead.id, patch);
+      res.json({ lead: updated });
+    } catch (err) { next(err); }
+  });
+
+  router.get('/partners', requireAccount, async (req, res, next) => {
+    try {
+      res.json({ partners: await db.listPartners(req.account.id) });
+    } catch (err) { next(err); }
+  });
+
+  router.post('/partners', requireAccount, async (req, res, next) => {
+    try {
+      const body = req.body || {};
+      if (!String(body.name || '').trim()) return res.status(400).json({ error: 'name_required' });
+      const handle = String(body.handle || '').replace(/^@/, '').trim();
+      const partner = await db.createPartner({
+        account_id: req.account.id,
+        name: String(body.name).trim(),
+        handle,
+        category: body.category || '',
+        why_relevant: body.why_relevant || '',
+        instagram_url: body.instagram_url || (handle ? `https://www.instagram.com/${handle}/` : ''),
+        email: body.email || '',
+        phone: body.phone || '',
+        website: body.website || '',
+        status: body.status || 'idea',
+        notes: body.notes || '',
+        source_url: body.source_url || '',
+      });
+      res.json({ partner });
+    } catch (err) { next(err); }
+  });
+
+  router.patch('/partners/:id', requireAccount, async (req, res, next) => {
+    try {
+      const partner = await db.getPartner(Number(req.params.id));
+      if (!partner || Number(partner.account_id) !== Number(req.account.id)) {
+        return res.status(404).json({ error: 'partner_not_found' });
+      }
+      const body = req.body || {};
+      const patch = {};
+      for (const key of ['name', 'category', 'why_relevant', 'instagram_url', 'email', 'phone', 'website', 'status', 'notes', 'source_url']) {
+        if (body[key] !== undefined) patch[key] = body[key];
+      }
+      if (body.handle !== undefined) {
+        patch.handle = String(body.handle || '').replace(/^@/, '').trim();
+        if (!body.instagram_url && patch.handle) patch.instagram_url = `https://www.instagram.com/${patch.handle}/`;
+      }
+      const updated = await db.updatePartner(partner.id, patch);
+      res.json({ partner: updated });
+    } catch (err) { next(err); }
+  });
+
+  router.delete('/partners/:id', requireAccount, async (req, res, next) => {
+    try {
+      const partner = await db.getPartner(Number(req.params.id));
+      if (!partner || Number(partner.account_id) !== Number(req.account.id)) {
+        return res.status(404).json({ error: 'partner_not_found' });
+      }
+      await db.deletePartner(partner.id);
+      res.json({ ok: true });
+    } catch (err) { next(err); }
+  });
+
+  router.post('/partners/:id/enrich', requireAccount, async (req, res, next) => {
+    try {
+      const partner = await db.getPartner(Number(req.params.id));
+      if (!partner || Number(partner.account_id) !== Number(req.account.id)) {
+        return res.status(404).json({ error: 'partner_not_found' });
+      }
+      if (!partner.handle) return res.status(400).json({ error: 'missing_handle' });
+      if (!instagram.businessDiscovery) return res.status(501).json({ error: 'discovery_unavailable', partner });
+      const disc = await instagram.businessDiscovery(req.account, partner.handle);
+      const bd = disc.business_discovery || disc;
+      const enrichment = {
+        username: bd.username || partner.handle,
+        name: bd.name || null,
+        followers_count: bd.followers_count ?? null,
+        media_count: bd.media_count ?? null,
+        biography: bd.biography || '',
+        website: bd.website || '',
+        profile_picture_url: bd.profile_picture_url || '',
+        fetched_at: new Date().toISOString(),
+      };
+      const patch = { enrichment };
+      if (!partner.website && bd.website) patch.website = bd.website;
+      const updated = await db.updatePartner(partner.id, patch);
+      res.json({ partner: updated });
+    } catch (err) {
+      err.status = err.status || 502;
+      next(err);
+    }
+  });
+
+
+
+  const {
+    chatWithAssistant,
+    executeProposal,
+    cancelProposal,
+    assistantStatus,
+  } = require('../services/assistant');
+
+  router.get('/assistant/status', requireAccount, (req, res) => {
+    res.json(assistantStatus(config));
+  });
+
+  router.get('/assistant/messages', requireAccount, async (req, res, next) => {
+    try {
+      const messages = await db.listAssistantMessages(req.account.id, { limit: 40 });
+      res.json({ ...assistantStatus(config), messages });
+    } catch (err) { next(err); }
+  });
+
+  router.post('/assistant/chat', requireAccount, async (req, res, next) => {
+    try {
+      const text = req.body?.text || req.body?.message || '';
+      const history = Array.isArray(req.body?.history) ? req.body.history : [];
+      const result = await chatWithAssistant({
+        db, instagram, config, account: req.account, userText: text, history,
+      });
+      const status = assistantStatus(config);
+      res.json({ ...status, ...result, message: status.message, saved_message: result.message });
+    } catch (err) { next(err); }
+  });
+
+  router.post('/assistant/proposals/:id/confirm', requireAccount, async (req, res, next) => {
+    try {
+      const result = await executeProposal({
+        db, config, instagram, account: req.account, proposalId: Number(req.params.id),
+      });
+      res.json({ ok: true, ...result });
+    } catch (err) { next(err); }
+  });
+
+  router.post('/assistant/proposals/:id/cancel', requireAccount, async (req, res, next) => {
+    try {
+      const result = await cancelProposal({ db, account: req.account, proposalId: Number(req.params.id) });
+      res.json({ ok: true, ...result });
+    } catch (err) { next(err); }
+  });
+
+  router.get('/feature-requests', requireAccount, async (req, res, next) => {
+    try {
+      res.json({ requests: await db.listFeatureRequests(req.account.id) });
+    } catch (err) { next(err); }
+  });
+
+  router.patch('/feature-requests/:id', requireAccount, async (req, res, next) => {
+    try {
+      const row = await db.getFeatureRequest(Number(req.params.id));
+      if (!row || Number(row.account_id) !== Number(req.account.id)) {
+        return res.status(404).json({ error: 'not_found' });
+      }
+      const status = String(req.body?.status || '');
+      if (!['new', 'in-progress', 'done'].includes(status)) {
+        return res.status(400).json({ error: 'invalid_status' });
+      }
+      const request = await db.updateFeatureRequest(row.id, { status });
+      res.json({ request });
+    } catch (err) { next(err); }
+  });
+
+
   return router;
 }
 

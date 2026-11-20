@@ -1,7 +1,7 @@
 const express = require('express');
 const { randomId, signCookie } = require('../lib/signatures');
 const { expiresAtFromSeconds } = require('../services/instagram');
-const { seedDemoAutomation } = require('../services/seed');
+const { seedDemoAutomation, seedDemoInsights } = require('../services/seed');
 
 const COOKIE = 'rona_sid';
 const PENDING_COOKIE = 'rona_pending';
@@ -318,7 +318,7 @@ function createAuthRouter({ db, config, instagram }) {
       });
     }
     await startSession(res, { userId, accountId: account.id });
-    if (username === 'rona_demo') await seedDemoAutomation(db, account.id);
+    if (username === 'rona_demo') await seedDemoInsights(db, account.id, instagram, account);
     res.json({ ok: true, account: publicAccount(account) });
     } catch (err) { next(err); }
   });
