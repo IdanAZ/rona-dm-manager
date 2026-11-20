@@ -34,6 +34,9 @@ function publicAccount(acc) {
     page_id: acc.page_id,
     page_name: acc.page_name,
     auth_mode: acc.auth_mode,
+    comment_poller_enabled: acc.comment_poller_enabled === undefined || acc.comment_poller_enabled === null
+      ? true
+      : Number(acc.comment_poller_enabled) !== 0,
     connected: !!acc.access_token || !!acc.page_access_token || acc.ig_user_id?.startsWith('mock_'),
   };
 }

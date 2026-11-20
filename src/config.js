@@ -39,6 +39,7 @@ const config = {
   followCheckMode: process.env.FOLLOW_CHECK_MODE || 'stub',
   pollIntervalMs: parseInt(process.env.MEDIA_POLL_INTERVAL_MS || '120000', 10),
   followupIntervalMs: parseInt(process.env.FOLLOWUP_INTERVAL_MS || '60000', 10),
+  commentPollIntervalMs: parseInt(process.env.POLL_INTERVAL_MS || '60000', 10),
 };
 
 module.exports = config;

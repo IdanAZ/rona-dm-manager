@@ -262,12 +262,13 @@ async function setupManualSend() {
   return { db, config, instagram, engine, account, auto };
 }
 
-test('manual opening DM sends text only, records a recipient, and is idempotent', async () => {
-  const { db, instagram, account, auto } = await setupManualSend();
+test('manual send posts a public reply and opening DM, records a recipient, and is idempotent', async () => {
+  const { db, instagram, engine, account, auto } = await setupManualSend();
   const now = new Date('2026-11-20T13:50:00Z');
   const first = await sendManualOpeningDm({
     db,
     instagram,
+    engine,
     account,
     commentId: 'mock_c_tamar',
     now,
@@ -283,19 +284,24 @@ test('manual opening DM sends text only, records a recipient, and is idempotent'
   assert.equal(recs[0].username, 'tamar_eligible');
   assert.equal(recs[0].status, 'opening_sent');
   assert.ok(recs[0].opening_sent_at);
+  assert.ok(recs[0].dm_sent_at);
+  assert.ok(recs[0].public_reply_sent_at);
+  assert.equal(await db.hasPublicReply('mock_c_tamar'), true);
 
   const logs = await db.listOutbound({ accountId: account.id, limit: 20 });
   const privates = logs.filter((l) => l.type === 'private_reply');
   assert.equal(privates.length, 1);
-  assert.equal(logs.some((l) => l.type === 'comment_reply'), false);
+  assert.equal(logs.some((l) => l.type === 'comment_reply'), true);
   const payload = JSON.parse(privates[0].payload);
   assert.equal(payload.body.message.text, OPENING_TEXT);
   assert.equal(payload.body.recipient.comment_id, 'mock_c_tamar');
-  assert.equal(payload.body.message.quick_replies, undefined);
+  assert.ok(Array.isArray(payload.body.message.quick_replies));
+  assert.equal(payload.body.message.quick_replies[0].title, 'כן, אשמח ❤️');
 
   const second = await sendManualOpeningDm({
     db,
     instagram,
+    engine,
     account,
     commentId: 'mock_c_tamar',
     now,
@@ -307,8 +313,7 @@ test('manual opening DM sends text only, records a recipient, and is idempotent'
   assert.equal((await db.listRecipients(auto.id)).length, 1);
   assert.equal((await db.listOutbound({ accountId: account.id, limit: 20 })).filter((l) => l.type === 'private_reply').length, 1);
 
-  // same commenter, even if the webhook fires later, must not send again
-  const engine = createEngine({ db, instagram, config: { mockMode: true, appUrl: 'http://localhost:3000', followCheckMode: 'stub', meta: { apiVersion: 'v23.0' } } });
+  // same commenter, later comment: no second DM (shared recipient), but a public reply is posted once for the new comment
   const hooked = await processPayload(
     mockCommentPayload({
       igUserId: account.ig_user_id,
@@ -320,18 +325,20 @@ test('manual opening DM sends text only, records a recipient, and is idempotent'
     }),
     { db, engine }
   );
-  assert.equal(hooked[0].skipped, true);
-  assert.equal(hooked[0].reason, 'already_recipient');
   assert.equal((await db.listRecipients(auto.id)).length, 1);
+  assert.equal((await db.listOutbound({ accountId: account.id, limit: 30 })).filter((l) => l.type === 'private_reply').length, 1);
+  assert.equal(await db.hasPublicReply('mock_c_tamar_later'), true);
+  assert.equal(hooked[0].ok, true);
   await db.close();
 });
 
 test('manual opening DM refuses comments older than 7 days without sending', async () => {
-  const { db, instagram, account, auto } = await setupManualSend();
+  const { db, instagram, engine, account, auto } = await setupManualSend();
   const now = new Date('2026-11-20T13:50:00Z');
   const result = await sendManualOpeningDm({
     db,
     instagram,
+    engine,
     account,
     commentId: 'mock_c_shira',
     now,
@@ -406,7 +413,12 @@ test('POST /api/audit/keyword-comments/:commentId/send is authenticated, idempot
   const shira = audit.json.items.find((i) => i.comment_id === 'mock_c_shira');
   assert.equal(tamar.already_recorded, true);
   assert.equal(tamar.can_send, false);
+  assert.equal(tamar.dm_ok, true);
+  assert.equal(tamar.public_reply_ok, true);
+  assert.equal(tamar.can_send_public_reply, false);
   assert.equal(shira.can_send, false);
+  const pending = (audit.json.groups && audit.json.groups.eligible_private_reply) || [];
+  assert.equal(pending.some((i) => i.comment_id === 'mock_c_tamar'), false);
 
   } finally {
     server.close();

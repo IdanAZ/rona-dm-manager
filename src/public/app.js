@@ -285,15 +285,27 @@ function navBtn(id, ic, label) {
 
 function canSendOpeningDm(item) {
   if (!item || !item.comment_id) return false;
+  if (item.dm_ok) return false;
   if (item.can_send === true) return true;
   if (item.can_send === false || item.already_recorded) return false;
   if (item.dm_status === 'already_got_dm' || item.dm_status === 'not_eligible') return false;
   return !!item.within_private_reply_window && (item.dm_status === 'eligible_private_reply' || item.dm_status === 'unknown');
 }
 
+function hasPublicReplyStatus(item) {
+  return !!(item && (item.public_reply_ok || item.public_reply));
+}
+
+function canSendPublicReply(item) {
+  if (!item || !item.comment_id) return false;
+  if (hasPublicReplyStatus(item)) return false;
+  if (item.can_send_public_reply === false) return false;
+  return item.can_send_public_reply === true || !!(item.dm_ok || item.already_recorded);
+}
+
 async function sendOpeningDm(item) {
   const who = item.username ? '@' + item.username : 'המגיבה';
-  if (!confirm(`לשלוח ל-${who} את הודעת הפתיחה של האוטומציה?`)) return;
+  if (!confirm(`לשלוח ל-${who} תגובה בפוסט ואת הודעת הפתיחה בפרטי?`)) return;
   state.auditAction = { ...(state.auditAction || {}), [item.comment_id]: { loading: true, text: '' } };
   render();
   try {
@@ -309,7 +321,40 @@ async function sendOpeningDm(item) {
     if (ok) {
       item.can_send = false;
       item.already_recorded = true;
-      item.dm_status = item.dm_status === 'unknown' ? 'unknown' : item.dm_status;
+      item.dm_ok = true;
+      item.dm_status = 'already_got_dm';
+      if (data.public_reply || item.public_reply) {
+        item.public_reply = true;
+        item.public_reply_ok = true;
+        item.can_send_public_reply = false;
+      }
+    }
+    state.auditAction[item.comment_id] = { loading: false, text, error: !ok };
+  } catch (err) {
+    state.auditAction[item.comment_id] = { loading: false, text: err.message || 'השליחה נכשלה', error: true };
+  }
+  render();
+}
+
+async function sendPublicReply(item) {
+  const who = item.username ? '@' + item.username : 'המגיבה';
+  if (!confirm(`לשלוח ל-${who} תגובה ציבורית בפוסט?`)) return;
+  state.auditAction = { ...(state.auditAction || {}), [item.comment_id]: { loading: true, text: '' } };
+  render();
+  try {
+    const res = await fetch(`/api/audit/keyword-comments/${encodeURIComponent(item.comment_id)}/public-reply`, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ media_id: state.audit?.media?.id || undefined }),
+    });
+    const data = await res.json().catch(() => ({}));
+    const text = data.message || data.error || (res.ok ? 'התגובה בפוסט נשלחה' : 'השליחה נכשלה');
+    const ok = res.ok && data.ok;
+    if (ok) {
+      item.public_reply = true;
+      item.public_reply_ok = true;
+      item.can_send_public_reply = false;
     }
     state.auditAction[item.comment_id] = { loading: false, text, error: !ok };
   } catch (err) {
@@ -361,9 +406,16 @@ function reasonLabel(reason) {
   return map[reason] || reason;
 }
 
+function statusMark(ok, label) {
+  return h('span', { class: 'audit-flag' + (ok ? ' is-ok' : ' is-missing') }, `${label} ${ok ? '✓' : '✗'}`);
+}
+
 function renderAuditItem(item) {
   const action = (state.auditAction || {})[item.comment_id] || {};
   const showSend = canSendOpeningDm(item) && !action.loading;
+  const showPublic = canSendPublicReply(item) && !showSend && !action.loading;
+  const publicOk = hasPublicReplyStatus(item);
+  const dmOk = !!item.dm_ok || item.dm_status === 'already_got_dm';
   return h('div', { class: 'audit-item' },
     h('div', { class: 'row' },
       atUser(item.username || 'unknown'),
@@ -373,16 +425,25 @@ function renderAuditItem(item) {
     h('div', { class: 'muted' },
       (item.timestamp_jerusalem || '') + (item.age_days != null ? ` · לפני ${item.age_days} ימים` : '')
     ),
-    item.public_reply ? h('div', { class: 'muted' }, 'יש תגובה ציבורית מרונה' + (item.public_reply_snippet ? `: “${item.public_reply_snippet}”` : '')) : h('div', { class: 'muted' }, 'אין תגובה ציבורית מרונה'),
+    h('div', { class: 'audit-flags' },
+      statusMark(publicOk, 'תגובה בפוסט'),
+      statusMark(dmOk, 'DM'),
+    ),
+    publicOk && item.public_reply_snippet ? h('div', { class: 'muted' }, `תגובה ציבורית מרונה: “${item.public_reply_snippet}”`) : null,
     sourceLabel(item) ? h('div', { class: 'muted' }, sourceLabel(item)) : null,
     item.borderline && item.borderline_reason ? h('div', { class: 'muted' }, reasonLabel(item.borderline_reason)) : null,
     item.dm_snippet ? h('div', { class: 'snippet' }, `קטע מה-DM: “${item.dm_snippet}”`) : null,
-    (showSend || action.loading || action.text) ? h('div', { class: 'audit-actions' },
-      showSend || action.loading ? h('button', {
+    (showSend || showPublic || action.loading || action.text) ? h('div', { class: 'audit-actions' },
+      showSend || (action.loading && showSend) ? h('button', {
         class: 'btn btn-sm',
         disabled: !!action.loading,
         onClick: () => sendOpeningDm(item),
       }, action.loading ? 'שולחת…' : 'שליחת ההודעה') : null,
+      showPublic || (action.loading && showPublic) ? h('button', {
+        class: 'btn btn-sm',
+        disabled: !!action.loading,
+        onClick: () => sendPublicReply(item),
+      }, action.loading ? 'שולחת…' : 'תגובה בפוסט') : null,
       action.text ? h('div', { class: action.error ? 'audit-result is-error' : 'audit-result is-ok' }, action.text) : null,
     ) : null,
   );
@@ -400,7 +461,7 @@ function renderAuditPage() {
   const wrap = h('div', {});
   wrap.append(
     h('div', { class: 'page-head' }, h('h2', {}, 'מי כבר קיבל הודעה')),
-    h('p', { class: 'audit-note' }, 'כאן רואים מי הגיבה עם מילת המפתח, והאם כבר נשלחה לה הודעה. למי שזכאית אפשר לשלוח ידנית את הודעת הפתיחה, אחרי אישור. מי שכבר קיבלה לא תישלח שוב.'),
+    h('p', { class: 'audit-note' }, 'כאן רואים מי הגיבה עם מילת המפתח, והאם כבר נשלחה תגובה בפוסט ו־DM. למי שחסר אפשר להשלים ידנית, אחרי אישור. מי שכבר קיבלה הודעה יורדת מרשימת הממתינות.'),
     h('div', { class: 'audit-controls' },
       h('input', {
         value: state.auditKeyword,
@@ -832,6 +893,30 @@ function renderAccountPage() {
       }, atUser(a.username))
     ) : null,
     h('a', { class: 'btn btn-ghost', href: '/auth/login?add=1', style: { width: '100%', marginTop: '8px' } }, 'הוספת חשבון אינסטגרם נוסף'),
+  ));
+
+  const pollerOn = acc.comment_poller_enabled !== false;
+  wrap.append(h('div', { class: 'card' },
+    h('h3', {}, 'הגדרות'),
+    toggleRow(
+      'בדיקה אוטומטית כל דקה',
+      'השרת בודק תגובות בפוסטים עם אוטומציה פעילה, ומשלים תגובה בפוסט או DM חסרים. ברירת המחדל דלוקה.',
+      pollerOn,
+      async (v) => {
+        try {
+          const data = await api('/api/account/settings', { method: 'PATCH', body: { comment_poller_enabled: v } });
+          if (state.me && data.account) {
+            state.me.account = { ...state.me.account, ...data.account };
+            if (Array.isArray(state.me.accounts)) {
+              state.me.accounts = state.me.accounts.map((a) => a.id === data.account.id ? { ...a, ...data.account } : a);
+            }
+          }
+          render();
+        } catch (err) {
+          alert(err.message || 'שמירת ההגדרה נכשלה');
+        }
+      }
+    ),
   ));
 
   wrap.append(h('div', { class: 'card' },

@@ -417,4 +417,7 @@ module.exports = {
   classifyComment,
   buildAudit,
   snippetOf,
+  isSameAccount,
+  publicReplyFromAccount,
+  commentAuthor,
 };

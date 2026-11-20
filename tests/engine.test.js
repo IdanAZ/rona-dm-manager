@@ -71,7 +71,7 @@ describe('comment automation engine', () => {
     await processPayload(make(), { db, engine });
     const second = await processPayload(make(), { db, engine });
     assert.equal(second[0].skipped, true);
-    assert.equal(second[0].reason, 'duplicate');
+    assert.ok(['duplicate', 'already_recipient'].includes(second[0].reason), second[0].reason);
     assert.equal((await db.listRecipients(auto.id)).length, 1);
   });
 

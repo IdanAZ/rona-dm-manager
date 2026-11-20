@@ -1,6 +1,7 @@
 const { matchesComment } = require('../lib/keywords');
 const { randomId } = require('../lib/signatures');
 const { nowSql } = require('../db');
+const { isWithinPrivateReplyWindow, publicReplyFromAccount, isSameAccount } = require('../lib/audit');
 
 function pickVariant(raw) {
   let list = raw;
@@ -36,25 +37,391 @@ function automationMatchesMedia(auto, mediaId) {
 }
 
 function createEngine({ db, instagram, config }) {
+  const MAX_SEND_ATTEMPTS = 2;
+  const DEFAULT_PUBLIC_REPLY = 'איזה כיף! שלחתי לך הודעה בפרטי ❤️';
+  const DEFAULT_OPENING_DM = 'היי! שלחתי לך הודעה 💌';
+
+  function eventComment(event, options) {
+    return options.comment || event;
+  }
+
+  function commentHasRonaPublicReply(comment, account) {
+    if (!comment || !account) return false;
+    return publicReplyFromAccount(comment, account).length > 0;
+  }
+
+  function recipientHasDm(recipient) {
+    if (!recipient) return false;
+    return !!(recipient.dm_sent_at || recipient.opening_sent_at);
+  }
+
+  async function deliverPublicReply({ account, automation, commentId, recipient, alreadyOnInstagram, source }) {
+    if (alreadyOnInstagram) {
+      await db.recordObservedPublicReply({
+        commentId,
+        accountId: account.id,
+        recipientId: recipient?.id,
+        source: 'instagram',
+      });
+      if (recipient && !recipient.public_reply_sent_at && String(recipient.comment_id) === String(commentId)) {
+        await db.updateRecipient(recipient.id, { public_reply_sent_at: nowSql() });
+        recipient.public_reply_sent_at = nowSql();
+      }
+      return { ok: true, skipped: true, reason: 'already_on_instagram' };
+    }
+    if (await db.hasPublicReply(commentId)) {
+      if (recipient && !recipient.public_reply_sent_at && String(recipient.comment_id) === String(commentId)) {
+        await db.updateRecipient(recipient.id, { public_reply_sent_at: nowSql() });
+        recipient.public_reply_sent_at = nowSql();
+      }
+      return { ok: true, skipped: true, reason: 'already_sent' };
+    }
+    const claim = await db.claimPublicReply({
+      commentId,
+      accountId: account.id,
+      recipientId: recipient?.id,
+    });
+    if (!claim.claimed) {
+      if (claim.row?.status === 'sent') return { ok: true, skipped: true, reason: 'already_sent' };
+      if (claim.exhausted) return { ok: false, skipped: true, reason: 'failed_exhausted' };
+      return { ok: true, skipped: true, reason: 'in_progress' };
+    }
+    const text = pickVariant(automation.public_reply_variants) || DEFAULT_PUBLIC_REPLY;
+    try {
+      const result = await instagram.replyToComment(account, commentId, text);
+      await db.markPublicReplySent({ commentId, recipientId: recipient?.id, source: source || 'app' });
+      if (recipient && String(recipient.comment_id) === String(commentId)) {
+        await db.updateRecipient(recipient.id, { public_reply_sent_at: nowSql() });
+        recipient.public_reply_sent_at = nowSql();
+      }
+      return { ok: true, text, result };
+    } catch (err) {
+      await db.markPublicReplyFailed({ commentId, error: err.message });
+      if (recipient) {
+        await db.updateRecipient(recipient.id, { last_error: err.message, status: recipient.dm_sent_at ? recipient.status : 'failed' });
+      }
+      return { ok: false, error: err.message };
+    }
+  }
+
+  async function deliverOpeningDm({
+    account,
+    automation,
+    commentId,
+    text,
+    igsid,
+    username,
+    mediaId,
+    recipient,
+    followerHint,
+  }) {
+    if (!recipient) return { ok: false, error: 'missing_recipient' };
+    if (recipientHasDm(recipient) || (await db.hasPrivateReply(commentId))) {
+      if (!recipient.dm_sent_at) {
+        const when = recipient.opening_sent_at || nowSql();
+        await db.updateRecipient(recipient.id, { dm_sent_at: when });
+        recipient.dm_sent_at = when;
+      }
+      return { ok: true, skipped: true, reason: 'already_sent' };
+    }
+    if (Number(recipient.send_attempts || 0) >= MAX_SEND_ATTEMPTS && recipient.status === 'failed') {
+      return { ok: false, skipped: true, reason: 'failed_exhausted' };
+    }
+
+    if (automation.must_follow) {
+      const follows = await instagram.checkIsFollower(account, igsid, followerHint);
+      if (!follows) {
+        if (!recipient.public_reply_sent_at && !(await db.hasPublicReply(commentId))) {
+          const reminder = 'עקבי לחשבון כדי שאוכל לשלוח לך את הפרטים בפרטי 💌';
+          const claim = await db.claimPublicReply({
+            commentId,
+            accountId: account.id,
+            recipientId: recipient.id,
+          });
+          if (claim.claimed) {
+            try {
+              await instagram.replyToComment(account, commentId, reminder);
+              await db.markPublicReplySent({ commentId, recipientId: recipient.id, source: 'app' });
+              await db.updateRecipient(recipient.id, { public_reply_sent_at: nowSql() });
+              recipient.public_reply_sent_at = nowSql();
+            } catch (err) {
+              await db.markPublicReplyFailed({ commentId, error: err.message });
+            }
+          }
+        }
+        await db.updateRecipient(recipient.id, { status: 'skipped_not_follower' });
+        return { skipped: true, reason: 'not_follower' };
+      }
+    }
+
+    await db.updateRecipient(recipient.id, {
+      send_attempts: Number(recipient.send_attempts || 0) + 1,
+    });
+    recipient.send_attempts = Number(recipient.send_attempts || 0) + 1;
+
+    if (await db.hasPrivateReply(commentId)) {
+      await db.updateRecipient(recipient.id, {
+        status: 'skipped_private_reply_used',
+        dm_sent_at: nowSql(),
+      });
+      return { skipped: true, reason: 'private_reply_already_sent' };
+    }
+
+    const clickId = recipient.click_id || randomId(12);
+    const buttonLabel = automation.opening_dm_button_label || 'כן, אשמח ❤️';
+    const message = automation.opening_dm_text || DEFAULT_OPENING_DM;
+    if (!recipient.click_id) {
+      await db.updateRecipient(recipient.id, { click_id: clickId });
+      recipient.click_id = clickId;
+    }
+    const quickReplies = buttonLabel
+      ? [{ title: buttonLabel, payload: `QR_YES:${automation.id}:${recipient.id}` }]
+      : [];
+    try {
+      const opening = await instagram.sendPrivateReply(account, {
+        commentId,
+        igsid,
+        message,
+        quickReplies,
+      });
+      await db.recordPrivateReply({
+        commentId,
+        accountId: account.id,
+        recipientIgsid: opening.recipient_id || igsid,
+        messageId: opening.message_id,
+      });
+      const updates = {
+        status: 'opening_sent',
+        opening_sent_at: nowSql(),
+        dm_sent_at: nowSql(),
+        last_user_interaction_at: nowSql(),
+        last_error: null,
+        click_id: clickId,
+      };
+      if (opening.recipient_id && opening.recipient_id !== igsid) {
+        updates.igsid = opening.recipient_id;
+      }
+      await db.updateRecipient(recipient.id, updates);
+      Object.assign(recipient, updates);
+      return { ok: true, opening };
+    } catch (err) {
+      await db.updateRecipient(recipient.id, { status: 'failed', last_error: err.message });
+      recipient.status = 'failed';
+      return { ok: false, error: err.message };
+    }
+  }
+
+  async function processMatchedComment(account, event, matched, options = {}) {
+    const commentId = String(event.id || event.comment_id || '');
+    const text = event.text || options.comment?.text || '';
+    const mediaId = event.media?.id || event.media_id || options.comment?.media?.id || '';
+    const from = event.from || options.comment?.from || {};
+    const igsid = from.id ? String(from.id) : String(options.comment?.from_id || '');
+    const username = from.username || options.comment?.username || '';
+    const source = options.source || 'webhook';
+    const comment = eventComment(event, options);
+
+    let existing = await db.findRecipientByCommentOrUser({
+      accountId: account.id,
+      commentId,
+      igsid,
+      username,
+      automationId: matched.id,
+    });
+    if (!existing) {
+      existing = await db.findRecipientByCommentOrUser({
+        accountId: account.id,
+        commentId,
+        igsid,
+        username,
+      });
+    }
+
+    let recipient = existing;
+    let claimed = false;
+    if (!recipient) {
+      const claim = await db.claimRecipient({
+        automation_id: matched.id,
+        account_id: account.id,
+        comment_id: commentId,
+        igsid: igsid || null,
+        username: username || null,
+        comment_text: text,
+        media_id: mediaId || null,
+        status: 'pending',
+        click_id: randomId(12),
+      });
+      recipient = claim.recipient;
+      claimed = claim.claimed;
+    }
+    if (!recipient) {
+      return { skipped: true, reason: 'claim_failed' };
+    }
+
+    await db.markCommentProcessed({
+      commentId,
+      accountId: account.id,
+      automationId: matched.id,
+      reason: 'matched',
+    });
+
+    const alreadyOnInstagram = commentHasRonaPublicReply(comment, account);
+    const hasDm = recipientHasDm(recipient) || (await db.hasPrivateReply(commentId));
+    const publicOnThisComment = alreadyOnInstagram
+      || (await db.hasPublicReply(commentId))
+      || !!(recipient.public_reply_sent_at && String(recipient.comment_id) === String(commentId));
+    const hasPublic = publicOnThisComment;
+
+    if (hasDm && hasPublic && !claimed) {
+      return {
+        skipped: true,
+        reason: 'already_recipient',
+        automationId: matched.id,
+        recipientId: recipient.id,
+      };
+    }
+
+    // must-follow: if they don't follow, only the reminder public reply is sent (no opening DM).
+    if (matched.must_follow && !hasDm) {
+      const follows = await instagram.checkIsFollower(account, igsid, options.followerHint);
+      if (!follows) {
+        const dmResult = await deliverOpeningDm({
+          account,
+          automation: matched,
+          commentId,
+          text,
+          igsid,
+          username,
+          mediaId,
+          recipient,
+          followerHint: options.followerHint,
+        });
+        if (source === 'poller') {
+          await db.logOutbound({
+            accountId: account.id,
+            automationId: matched.id,
+            recipientId: recipient.id,
+            type: 'poller_send',
+            payload: { comment_id: commentId, username, dm: 'not_follower' },
+            mock: !!(config && config.mockMode),
+          });
+        }
+        return {
+          skipped: true,
+          reason: 'not_follower',
+          automationId: matched.id,
+          recipientId: recipient.id,
+          publicReply: dmResult && recipient.public_reply_sent_at ? true : null,
+        };
+      }
+    }
+
+    // Always send both halves when missing. Public reply first, then opening DM.
+    const publicResult = await deliverPublicReply({
+      account,
+      automation: matched,
+      commentId,
+      recipient,
+      alreadyOnInstagram,
+      source,
+    });
+
+    const dmResult = await deliverOpeningDm({
+      account,
+      automation: matched,
+      commentId,
+      text,
+      igsid,
+      username,
+      mediaId,
+      recipient,
+      followerHint: options.followerHint,
+    });
+
+    const didPublic = !!(publicResult && publicResult.ok && !publicResult.skipped);
+    const didDm = !!(dmResult && dmResult.ok && !dmResult.skipped);
+    if (source === 'poller' && (didPublic || didDm || (dmResult && dmResult.reason === 'not_follower'))) {
+      await db.logOutbound({
+        accountId: account.id,
+        automationId: matched.id,
+        recipientId: recipient.id,
+        type: 'poller_send',
+        payload: {
+          comment_id: commentId,
+          username,
+          public_reply: didPublic ? publicResult.text : (publicResult?.reason || null),
+          dm: didDm ? 'sent' : (dmResult?.reason || dmResult?.error || null),
+        },
+        mock: !!(config && config.mockMode),
+      });
+    }
+
+    if (dmResult && dmResult.reason === 'not_follower') {
+      return { skipped: true, reason: 'not_follower', automationId: matched.id, recipientId: recipient.id };
+    }
+    if (dmResult && dmResult.reason === 'private_reply_already_sent' && (hasPublic || publicResult?.ok)) {
+      return {
+        skipped: true,
+        reason: 'private_reply_already_sent',
+        automationId: matched.id,
+        publicReply: publicResult?.text || null,
+        recipientId: recipient.id,
+      };
+    }
+
+    const publicFailed = publicResult && publicResult.ok === false && !publicResult.skipped;
+    const dmFailed = dmResult && dmResult.ok === false && !dmResult.skipped;
+    if (publicFailed || dmFailed) {
+      return {
+        ok: false,
+        automationId: matched.id,
+        recipientId: recipient.id,
+        publicReply: publicResult?.text || null,
+        opening: dmResult?.opening || null,
+        error: dmResult?.error || publicResult?.error,
+        reason: dmFailed ? 'dm_failed' : 'public_reply_failed',
+        source,
+      };
+    }
+
+    if (!didPublic && !didDm && !claimed) {
+      return {
+        skipped: true,
+        reason: 'already_recipient',
+        automationId: matched.id,
+        recipientId: recipient.id,
+      };
+    }
+
+    return {
+      ok: true,
+      automationId: matched.id,
+      recipientId: recipient.id,
+      publicReply: publicResult?.text || null,
+      opening: dmResult?.opening || null,
+      source,
+    };
+  }
+
   async function handleComment(account, event, options = {}) {
     const commentId = String(event.id || event.comment_id || '');
-    const text = event.text || '';
-    const mediaId = event.media?.id || event.media_id || '';
-    const from = event.from || {};
-    const igsid = from.id ? String(from.id) : '';
-    const username = from.username || '';
-    const isSelf = igsid && (igsid === String(account.ig_user_id) || from.self_ig_scoped_id);
-
+    const text = event.text || options.comment?.text || '';
+    const mediaId = event.media?.id || event.media_id || options.comment?.media?.id || '';
+    const from = event.from || options.comment?.from || {};
+    const igsid = from.id ? String(from.id) : String(options.comment?.from_id || '');
     if (!commentId) return { skipped: true, reason: 'missing_comment_id' };
+
+    const author = { id: igsid, username: from.username || options.comment?.username };
+    const isSelf = (igsid && (igsid === String(account.ig_user_id) || from.self_ig_scoped_id))
+      || isSameAccount(author, account);
     if (isSelf) {
       await db.markCommentProcessed({ commentId, accountId: account.id, reason: 'self_comment' });
       return { skipped: true, reason: 'self_comment' };
     }
-    if (await db.isCommentProcessed(commentId)) {
-      return { skipped: true, reason: 'duplicate' };
-    }
 
-    const live = await db.listLiveAutomationsForAccount(account.id);
+    const live = options.automation
+      ? [options.automation]
+      : await db.listLiveAutomationsForAccount(account.id);
     const matched = live.find((auto) => {
       if (!automationMatchesMedia(auto, mediaId)) return false;
       return matchesComment({
@@ -70,142 +437,7 @@ function createEngine({ db, instagram, config }) {
       return { skipped: true, reason: 'no_match' };
     }
 
-    const existingRecipient = await db.findRecipientByCommentOrUser({
-      accountId: account.id,
-      commentId,
-      igsid,
-      username,
-    });
-    if (existingRecipient) {
-      await db.markCommentProcessed({
-        commentId,
-        accountId: account.id,
-        automationId: matched.id,
-        reason: 'already_recipient',
-      });
-      return {
-        skipped: true,
-        reason: 'already_recipient',
-        automationId: matched.id,
-        recipientId: existingRecipient.id,
-      };
-    }
-
-    // Mark early to avoid double-processing if two webhooks race.
-    await db.markCommentProcessed({
-      commentId,
-      accountId: account.id,
-      automationId: matched.id,
-      reason: 'matched',
-    });
-
-    if (matched.must_follow) {
-      const follows = await instagram.checkIsFollower(account, igsid, options.followerHint);
-      if (!follows) {
-        if (matched.public_reply_enabled) {
-          await instagram.replyToComment(
-            account,
-            commentId,
-            'עקבי לחשבון כדי שאוכל לשלוח לך את הפרטים בפרטי 💌'
-          );
-        }
-        await db.createRecipient({
-          automation_id: matched.id,
-          account_id: account.id,
-          comment_id: commentId,
-          igsid,
-          username,
-          comment_text: text,
-          media_id: mediaId,
-          status: 'skipped_not_follower',
-        });
-        return { skipped: true, reason: 'not_follower', automationId: matched.id };
-      }
-    }
-
-    let publicReply = null;
-    if (matched.public_reply_enabled) {
-      publicReply = pickVariant(matched.public_reply_variants);
-      if (publicReply) {
-        await instagram.replyToComment(account, commentId, publicReply);
-      }
-    }
-
-    let opening = null;
-    let recipient = null;
-    if (matched.opening_dm_enabled) {
-      if (await db.hasPrivateReply(commentId)) {
-        recipient = await db.createRecipient({
-          automation_id: matched.id,
-          account_id: account.id,
-          comment_id: commentId,
-          igsid,
-          username,
-          comment_text: text,
-          media_id: mediaId,
-          status: 'skipped_private_reply_used',
-        });
-        return {
-          skipped: true,
-          reason: 'private_reply_already_sent',
-          automationId: matched.id,
-          publicReply,
-        };
-      }
-      const clickId = randomId(12);
-      const buttonLabel = matched.opening_dm_button_label || 'כן, אשמח ❤️';
-      // Recipient row first so the button payload can include its id.
-      recipient = await db.createRecipient({
-        automation_id: matched.id,
-        account_id: account.id,
-        comment_id: commentId,
-        igsid,
-        username,
-        comment_text: text,
-        media_id: mediaId,
-        status: 'opening_sent',
-        opening_sent_at: nowSql(),
-        click_id: clickId,
-        last_user_interaction_at: nowSql(),
-      });
-      const quickReplies = buttonLabel
-        ? [{ title: buttonLabel, payload: `QR_YES:${matched.id}:${recipient.id}` }]
-        : [];
-      opening = await instagram.sendPrivateReply(account, {
-        commentId,
-        igsid,
-        message: matched.opening_dm_text || 'היי! שלחתי לך הודעה 💌',
-        quickReplies,
-      });
-      await db.recordPrivateReply({
-        commentId,
-        accountId: account.id,
-        recipientIgsid: opening.recipient_id || igsid,
-        messageId: opening.message_id,
-      });
-      if (opening.recipient_id && opening.recipient_id !== igsid) {
-        await db.updateRecipient(recipient.id, { igsid: opening.recipient_id });
-      }
-    } else {
-      recipient = await db.createRecipient({
-        automation_id: matched.id,
-        account_id: account.id,
-        comment_id: commentId,
-        igsid,
-        username,
-        comment_text: text,
-        media_id: mediaId,
-        status: 'comment_only',
-      });
-    }
-
-    return {
-      ok: true,
-      automationId: matched.id,
-      recipientId: recipient?.id,
-      publicReply,
-      opening,
-    };
+    return processMatchedComment(account, event, matched, options);
   }
 
   async function sendSecondDm(account, recipient, automation) {
@@ -376,6 +608,9 @@ function createEngine({ db, instagram, config }) {
 
   return {
     handleComment,
+    processMatchedComment,
+    deliverPublicReply,
+    deliverOpeningDm,
     handlePostback,
     handleInboundMessage,
     processFollowups,

@@ -123,6 +123,30 @@ async function loadComment(instagram, account, commentId, mediaId) {
   }
 }
 
+function regroupAuditItems(result) {
+  if (!result || !Array.isArray(result.items)) return result;
+  const items = result.items;
+  const groups = {
+    already_got_dm: items.filter((i) => i.dm_status === 'already_got_dm' || i.dm_ok),
+    eligible_private_reply: items.filter((i) => i.dm_status === 'eligible_private_reply' && !i.dm_ok),
+    not_eligible: items.filter((i) => i.dm_status === 'not_eligible'),
+    unknown_dm: items.filter((i) => i.dm_status === 'unknown' && !i.dm_ok),
+    borderline: items.filter((i) => i.borderline),
+  };
+  result.groups = groups;
+  result.counts = {
+    ...(result.counts || {}),
+    total: items.length,
+    already_got_dm: groups.already_got_dm.length,
+    eligible_private_reply: groups.eligible_private_reply.length,
+    not_eligible: groups.not_eligible.length,
+    unknown_dm: groups.unknown_dm.length,
+    borderline: groups.borderline.length,
+    public_replies: items.filter((i) => i.public_reply || i.public_reply_ok).length,
+  };
+  return result;
+}
+
 async function attachRecipientFlags(db, account, result) {
   if (!result || !Array.isArray(result.items) || !db) return result;
   for (const item of result.items) {
@@ -132,14 +156,30 @@ async function attachRecipientFlags(db, account, result) {
       igsid: item.igsid,
       username: item.username,
     });
+    const publicRow = db.getPublicReply ? await db.getPublicReply(item.comment_id) : null;
+    const appPublic = !!(publicRow && publicRow.status === 'sent')
+      || !!(existing && existing.public_reply_sent_at && String(existing.comment_id) === String(item.comment_id));
+    const igPublic = !!item.public_reply;
+    const publicOk = igPublic || appPublic;
+    const dmOk = !!(existing && (existing.dm_sent_at || existing.opening_sent_at))
+      || item.dm_status === 'already_got_dm';
+
     item.already_recorded = !!existing;
     item.recipient_id = existing?.id || null;
-    item.can_send = !!item.within_private_reply_window && !existing && item.dm_status !== 'already_got_dm';
+    item.public_reply = publicOk;
+    item.public_reply_ok = publicOk;
+    item.dm_ok = dmOk;
+    item.app_public_reply = appPublic;
+    item.can_send = !!item.within_private_reply_window && !dmOk && item.dm_status !== 'not_eligible';
+    item.can_send_public_reply = !publicOk;
+    if (dmOk && item.dm_status !== 'already_got_dm') {
+      item.dm_status = 'already_got_dm';
+    }
   }
-  return result;
+  return regroupAuditItems(result);
 }
 
-async function sendManualOpeningDm({ db, instagram, account, commentId, mediaId, now } = {}) {
+async function sendManualOpeningDm({ db, instagram, engine, account, commentId, mediaId, now } = {}) {
   const id = String(commentId || '').trim();
   if (!id) {
     return { ok: false, status: 400, error: 'missing_comment_id', message: 'חסר מזהה תגובה.' };
@@ -181,21 +221,16 @@ async function sendManualOpeningDm({ db, instagram, account, commentId, mediaId,
     igsid,
     username,
   });
-  if (existing) {
+  const publicRow = db.getPublicReply ? await db.getPublicReply(id) : null;
+  const hasPublic = !!(publicRow && publicRow.status === 'sent') || !!(existing && existing.public_reply_sent_at && String(existing.comment_id) === id);
+  const hasDm = !!(existing && (existing.dm_sent_at || existing.opening_sent_at)) || (await db.hasPrivateReply(id));
+  if (hasDm && hasPublic) {
     return {
       ok: false,
       status: 409,
       error: 'already_sent',
       message: 'ההודעה כבר נשלחה לנמענת הזו.',
-      recipient_id: existing.id,
-    };
-  }
-  if (await db.hasPrivateReply(id)) {
-    return {
-      ok: false,
-      status: 409,
-      error: 'already_sent',
-      message: 'כבר נשלחה תשובה פרטית לתגובה הזו.',
+      recipient_id: existing?.id || null,
     };
   }
 
@@ -218,73 +253,170 @@ async function sendManualOpeningDm({ db, instagram, account, commentId, mediaId,
     };
   }
 
-  const openingText = String(matched.opening_dm_text || '').trim();
-  if (!openingText) {
-    return {
-      ok: false,
-      status: 400,
-      error: 'missing_opening_text',
-      message: 'לאוטומציה אין טקסט להודעת הפתיחה.',
-    };
+  if (!engine || typeof engine.handleComment !== 'function') {
+    return { ok: false, status: 500, error: 'engine_unavailable', message: 'מנוע השליחה לא זמין.' };
   }
 
-  let opening;
-  try {
-    opening = await instagram.sendPrivateReply(account, {
-      commentId: id,
-      igsid,
-      message: openingText,
-    });
-  } catch (err) {
+  const handled = await engine.handleComment(account, {
+    id,
+    text,
+    media: { id: commentMediaId },
+    media_id: commentMediaId,
+    from: comment.from || { id: igsid, username },
+    replies: comment.replies || [],
+  }, {
+    source: 'manual',
+    automation: matched,
+    comment: { ...comment, media: comment.media || { id: commentMediaId } },
+    now: when,
+  });
+
+  if (handled.skipped && handled.reason === 'already_recipient' && hasDm && hasPublic) {
+    return {
+      ok: false,
+      status: 409,
+      error: 'already_sent',
+      message: 'ההודעה כבר נשלחה לנמענת הזו.',
+      recipient_id: handled.recipientId || existing?.id || null,
+    };
+  }
+  if (handled.ok === false) {
     return {
       ok: false,
       status: 502,
       error: 'send_failed',
-      message: err.message || 'שליחת ההודעה נכשלה.',
+      message: handled.error || 'שליחת ההודעה נכשלה.',
+      recipient_id: handled.recipientId || null,
     };
   }
 
-  const recipient = await db.createRecipient({
-    automation_id: matched.id,
-    account_id: account.id,
-    comment_id: id,
-    igsid: opening.recipient_id || igsid,
-    username,
-    comment_text: text,
-    media_id: commentMediaId || null,
-    status: 'opening_sent',
-    opening_sent_at: nowSql(),
-    click_id: randomId(12),
-    last_user_interaction_at: nowSql(),
-  });
-  await db.recordPrivateReply({
-    commentId: id,
-    accountId: account.id,
-    recipientIgsid: opening.recipient_id || igsid,
-    messageId: opening.message_id,
-  });
-  await db.markCommentProcessed({
-    commentId: id,
-    accountId: account.id,
-    automationId: matched.id,
-    reason: 'manual_opening_dm',
-  });
-
+  const recipient = handled.recipientId ? await db.getRecipient(handled.recipientId) : existing;
   return {
     ok: true,
     status: 200,
     message: 'ההודעה נשלחה',
-    recipient_id: recipient.id,
+    recipient_id: recipient?.id || handled.recipientId || null,
     automation_id: matched.id,
-    message_id: opening.message_id || null,
-    opening,
+    message_id: handled.opening?.message_id || null,
+    public_reply: handled.publicReply || null,
+    opening: handled.opening,
   };
 }
+
+async function sendMissingPublicReply({ db, instagram, engine, account, commentId, mediaId, now } = {}) {
+  const id = String(commentId || '').trim();
+  if (!id) {
+    return { ok: false, status: 400, error: 'missing_comment_id', message: 'חסר מזהה תגובה.' };
+  }
+  let comment;
+  try {
+    comment = await loadComment(instagram, account, id, mediaId);
+  } catch (err) {
+    return {
+      ok: false,
+      status: err.status === 404 ? 404 : 502,
+      error: 'comment_not_found',
+      message: err.message || 'התגובה לא נמצאה.',
+    };
+  }
+  if (!comment) {
+    return { ok: false, status: 404, error: 'comment_not_found', message: 'התגובה לא נמצאה.' };
+  }
+
+  const igsid = String(comment.from?.id || comment.from_id || '');
+  const username = comment.username || comment.from?.username || '';
+  const commentMediaId = String(comment.media?.id || mediaId || '');
+  const { publicReplyFromAccount, isSameAccount, commentAuthor } = require('../lib/audit');
+  if (isSameAccount(commentAuthor(comment), account)) {
+    return { ok: false, status: 400, error: 'own_comment', message: 'לא שולחים תגובה על תגובה של רונה.' };
+  }
+  if (publicReplyFromAccount(comment, account).length || (db.hasPublicReply && await db.hasPublicReply(id))) {
+    return {
+      ok: false,
+      status: 409,
+      error: 'already_replied',
+      message: 'כבר יש תגובה ציבורית על התגובה הזו.',
+    };
+  }
+
+  const existing = await db.findRecipientByCommentOrUser({
+    accountId: account.id,
+    commentId: id,
+    igsid,
+    username,
+  });
+  const live = await db.listLiveAutomationsForAccount(account.id);
+  const matched = live.find((auto) => {
+    if (!automationMatchesMedia(auto, commentMediaId)) return false;
+    return matchesComment({
+      text: comment.text || '',
+      keywordMode: auto.keyword_mode,
+      keywords: auto.keywords,
+      matchType: auto.match_type,
+    });
+  });
+  if (!matched) {
+    return {
+      ok: false,
+      status: 404,
+      error: 'no_matching_automation',
+      message: 'לא נמצאה אוטומציה מתאימה לתגובה הזו.',
+    };
+  }
+  if (!engine || typeof engine.handleComment !== 'function') {
+    return { ok: false, status: 500, error: 'engine_unavailable', message: 'מנוע השליחה לא זמין.' };
+  }
+
+  const handled = await engine.handleComment(account, {
+    id,
+    text: comment.text || '',
+    media: { id: commentMediaId },
+    media_id: commentMediaId,
+    from: comment.from || { id: igsid, username },
+    replies: comment.replies || [],
+  }, {
+    source: 'manual',
+    automation: matched,
+    comment: { ...comment, media: comment.media || { id: commentMediaId } },
+    now: now || new Date(),
+  });
+
+  const publicOk = !!(handled.publicReply) || (db.hasPublicReply && await db.hasPublicReply(id));
+  if (!publicOk && handled.ok === false) {
+    return {
+      ok: false,
+      status: 502,
+      error: 'send_failed',
+      message: handled.error || 'שליחת התגובה הציבורית נכשלה.',
+      recipient_id: handled.recipientId || existing?.id || null,
+    };
+  }
+  if (!publicOk && handled.skipped && handled.reason === 'already_recipient') {
+    return {
+      ok: false,
+      status: 409,
+      error: 'already_replied',
+      message: 'כבר יש תגובה ציבורית על התגובה הזו.',
+      recipient_id: handled.recipientId || existing?.id || null,
+    };
+  }
+  return {
+    ok: true,
+    status: 200,
+    message: 'התגובה בפוסט נשלחה',
+    recipient_id: handled.recipientId || existing?.id || null,
+    automation_id: matched.id,
+    public_reply: handled.publicReply || null,
+  };
+}
+
 
 module.exports = {
   collectKeywordCommentAudit,
   authorKeys,
   attachRecipientFlags,
+  regroupAuditItems,
   sendManualOpeningDm,
+  sendMissingPublicReply,
   loadComment,
 };

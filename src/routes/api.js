@@ -3,7 +3,7 @@ const { requireAuth, requireAccount, publicAccount } = require('./auth');
 const { processPayload, mockCommentPayload, mockPostbackPayload, mockMessagePayload } = require('./webhooks');
 const { randomId } = require('../lib/signatures');
 const { nowSql } = require('../db');
-const { collectKeywordCommentAudit, attachRecipientFlags, sendManualOpeningDm } = require('../services/commentAudit');
+const { collectKeywordCommentAudit, attachRecipientFlags, sendManualOpeningDm, sendMissingPublicReply } = require('../services/commentAudit');
 
 function asBool(v, fallback = false) {
   if (v === undefined || v === null || v === '') return fallback;
@@ -111,6 +111,7 @@ function createApiRouter({ db, config, instagram, engine }) {
       const result = await sendManualOpeningDm({
         db,
         instagram,
+        engine,
         account: req.account,
         commentId: req.params.commentId,
         mediaId: req.body?.media_id || req.body?.mediaId,
@@ -119,6 +120,35 @@ function createApiRouter({ db, config, instagram, engine }) {
     } catch (err) {
       next(err);
     }
+  });
+
+  router.post('/audit/keyword-comments/:commentId/public-reply', requireAccount, async (req, res, next) => {
+    try {
+      const result = await sendMissingPublicReply({
+        db,
+        instagram,
+        engine,
+        account: req.account,
+        commentId: req.params.commentId,
+        mediaId: req.body?.media_id || req.body?.mediaId,
+      });
+      res.status(result.status || (result.ok ? 200 : 400)).json(result);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.patch('/account/settings', requireAccount, async (req, res, next) => {
+    try {
+      const body = req.body || {};
+      if (body.comment_poller_enabled === undefined) {
+        return res.status(400).json({ error: 'missing_settings' });
+      }
+      const account = await db.updateAccountSettings(req.account.id, {
+        comment_poller_enabled: body.comment_poller_enabled,
+      });
+      res.json({ ok: true, account: publicAccount(account) });
+    } catch (err) { next(err); }
   });
 
   router.get('/automations', requireAccount, async (req, res, next) => {

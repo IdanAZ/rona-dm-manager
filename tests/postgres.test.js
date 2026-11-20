@@ -99,8 +99,12 @@ function pgliteDriver(client) {
       if (typeof client.close === 'function') await client.close();
     },
     async listAccountColumns() {
+      return this.listColumns('accounts');
+    },
+    async listColumns(table) {
       const res = await client.query(
-        `SELECT column_name FROM information_schema.columns WHERE table_name = 'accounts'`
+        `SELECT column_name FROM information_schema.columns WHERE table_name = $1`,
+        [table]
       );
       return res.rows.map((r) => r.column_name);
     },

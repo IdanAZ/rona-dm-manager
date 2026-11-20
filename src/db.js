@@ -77,6 +77,7 @@ CREATE TABLE IF NOT EXISTS accounts (
   client_business_id TEXT,
   auth_mode TEXT,
   token_kind TEXT,
+  comment_poller_enabled INTEGER NOT NULL DEFAULT 1,
   created_at TEXT NOT NULL DEFAULT (${now}),
   updated_at TEXT NOT NULL DEFAULT (${now}),
   FOREIGN KEY (user_id) REFERENCES users(id)
@@ -149,6 +150,18 @@ CREATE TABLE IF NOT EXISTS private_replies (
   sent_at TEXT NOT NULL DEFAULT (${now})
 );
 
+CREATE TABLE IF NOT EXISTS public_replies (
+  comment_id TEXT PRIMARY KEY,
+  account_id INTEGER NOT NULL,
+  recipient_id INTEGER,
+  status TEXT NOT NULL DEFAULT 'pending',
+  attempts INTEGER NOT NULL DEFAULT 0,
+  last_error TEXT,
+  source TEXT,
+  sent_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (${now})
+);
+
 CREATE TABLE IF NOT EXISTS recipients (
   id ${id},
   automation_id INTEGER NOT NULL,
@@ -168,6 +181,10 @@ CREATE TABLE IF NOT EXISTS recipients (
   email TEXT,
   awaiting_email INTEGER NOT NULL DEFAULT 0,
   last_user_interaction_at TEXT,
+  public_reply_sent_at TEXT,
+  dm_sent_at TEXT,
+  send_attempts INTEGER NOT NULL DEFAULT 0,
+  last_error TEXT,
   created_at TEXT NOT NULL DEFAULT (${now}),
   FOREIGN KEY (automation_id) REFERENCES automations(id),
   FOREIGN KEY (account_id) REFERENCES accounts(id)
@@ -212,6 +229,12 @@ CREATE INDEX IF NOT EXISTS idx_recipients_igsid ON recipients(account_id, igsid)
 CREATE INDEX IF NOT EXISTS idx_recipients_click ON recipients(click_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_outbound_account ON outbound_log(account_id, created_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_recipients_automation_comment
+  ON recipients(automation_id, comment_id)
+  WHERE comment_id IS NOT NULL AND comment_id != '';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_recipients_automation_igsid
+  ON recipients(automation_id, igsid)
+  WHERE igsid IS NOT NULL AND igsid != '';
 `;
 }
 
@@ -248,7 +271,11 @@ function createSqliteDriver(dbPath) {
       db.close();
     },
     async listAccountColumns() {
-      return db.prepare('PRAGMA table_info(accounts)').all().map((c) => c.name);
+      return this.listColumns('accounts');
+    },
+    async listColumns(table) {
+      if (!/^[a-z_]+$/.test(table)) throw new Error('invalid table');
+      return db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
     },
   };
 }
@@ -295,13 +322,25 @@ function createPostgresDriver(connectionString) {
       await pool.end();
     },
     async listAccountColumns() {
+      return this.listColumns('accounts');
+    },
+    async listColumns(table) {
+      if (!/^[a-z_]+$/.test(table)) throw new Error('invalid table');
       const res = await pool.query(
         `SELECT column_name FROM information_schema.columns
-         WHERE table_name = 'accounts'`
+         WHERE table_name = $1`,
+        [table]
       );
       return res.rows.map((r) => r.column_name);
     },
   };
+}
+
+async function addColumnIfMissing(driver, table, name, typ) {
+  const cols = new Set(await driver.listColumns(table));
+  if (cols.has(name)) return;
+  const suffix = driver.dialect === 'postgres' ? 'IF NOT EXISTS ' : '';
+  await driver.exec(`ALTER TABLE ${table} ADD COLUMN ${suffix}${name} ${typ}`);
 }
 
 async function migrateColumns(driver) {
@@ -310,6 +349,51 @@ async function migrateColumns(driver) {
     if (cols.has(name)) continue;
     const suffix = driver.dialect === 'postgres' ? 'IF NOT EXISTS ' : '';
     await driver.exec(`ALTER TABLE accounts ADD COLUMN ${suffix}${name} ${typ}`);
+  }
+}
+
+async function migrateSchema(driver) {
+  await migrateColumns(driver);
+  await addColumnIfMissing(driver, 'accounts', 'comment_poller_enabled', 'INTEGER NOT NULL DEFAULT 1');
+  await addColumnIfMissing(driver, 'recipients', 'public_reply_sent_at', 'TEXT');
+  await addColumnIfMissing(driver, 'recipients', 'dm_sent_at', 'TEXT');
+  await addColumnIfMissing(driver, 'recipients', 'send_attempts', 'INTEGER NOT NULL DEFAULT 0');
+  await addColumnIfMissing(driver, 'recipients', 'last_error', 'TEXT');
+  const now = driver.dialect === 'postgres'
+    ? "TO_CHAR(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')"
+    : "datetime('now')";
+  await driver.exec(`
+CREATE TABLE IF NOT EXISTS public_replies (
+  comment_id TEXT PRIMARY KEY,
+  account_id INTEGER NOT NULL,
+  recipient_id INTEGER,
+  status TEXT NOT NULL DEFAULT 'pending',
+  attempts INTEGER NOT NULL DEFAULT 0,
+  last_error TEXT,
+  source TEXT,
+  sent_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (${now})
+)`);
+  try {
+    await driver.exec(`
+CREATE UNIQUE INDEX IF NOT EXISTS idx_recipients_automation_comment
+  ON recipients(automation_id, comment_id)
+  WHERE comment_id IS NOT NULL AND comment_id != ''`);
+    await driver.exec(`
+CREATE UNIQUE INDEX IF NOT EXISTS idx_recipients_automation_igsid
+  ON recipients(automation_id, igsid)
+  WHERE igsid IS NOT NULL AND igsid != ''`);
+  } catch (err) {
+    console.warn('[db] unique recipient index migration skipped:', err.message);
+  }
+  try {
+    await driver.exec(`
+UPDATE recipients
+   SET dm_sent_at = opening_sent_at
+ WHERE dm_sent_at IS NULL
+   AND opening_sent_at IS NOT NULL`);
+  } catch (err) {
+    console.warn('[db] dm_sent_at backfill skipped:', err.message);
   }
 }
 
@@ -435,6 +519,22 @@ function buildApi(driver) {
     },
     async listAccountsWithTokens() {
       return all("SELECT * FROM accounts WHERE access_token IS NOT NULL AND access_token != ''");
+    },
+    async updateAccountSettings(accountId, data = {}) {
+      const sets = [];
+      const vals = [];
+      if (data.comment_poller_enabled !== undefined) {
+        sets.push('comment_poller_enabled = ?');
+        vals.push(data.comment_poller_enabled ? 1 : 0);
+      }
+      if (!sets.length) return api.getAccount(accountId);
+      const nowExpr = driver.dialect === 'postgres'
+        ? "TO_CHAR(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')"
+        : "datetime('now')";
+      sets.push(`updated_at = ${nowExpr}`);
+      vals.push(accountId);
+      await run(`UPDATE accounts SET ${sets.join(', ')} WHERE id = ?`, vals);
+      return api.getAccount(accountId);
     },
 
     async createSession({ id, userId, activeAccountId, expiresAt }) {
@@ -568,6 +668,12 @@ function buildApi(driver) {
     async listLiveAutomationsForAccount(accountId) {
       return all("SELECT * FROM automations WHERE account_id = ? AND status = 'live'", [accountId]);
     },
+    async listLiveSpecificAutomations(accountId) {
+      return all(
+        "SELECT * FROM automations WHERE account_id = ? AND status = 'live' AND trigger_scope = 'specific' AND media_id IS NOT NULL AND media_id != ''",
+        [accountId]
+      );
+    },
     async listNextPending(accountId) {
       return all(
         "SELECT * FROM automations WHERE account_id = ? AND trigger_scope = 'next' AND next_pending = 1",
@@ -611,13 +717,85 @@ function buildApi(driver) {
         [commentId, accountId, recipientIgsid || null, messageId || null]
       );
     },
+    async getPublicReply(commentId) {
+      if (!commentId) return null;
+      return get('SELECT * FROM public_replies WHERE comment_id = ?', [String(commentId)]);
+    },
+    async hasPublicReply(commentId) {
+      const row = await get(
+        "SELECT 1 AS ok FROM public_replies WHERE comment_id = ? AND status = 'sent'",
+        [String(commentId)]
+      );
+      return !!row;
+    },
+    async claimPublicReply({ commentId, accountId, recipientId }) {
+      const id = String(commentId);
+      const existing = await api.getPublicReply(id);
+      if (existing) {
+        if (existing.status === 'sent') return { claimed: false, row: existing };
+        if (Number(existing.attempts) >= 2) return { claimed: false, row: existing, exhausted: true };
+        if (existing.status === 'failed' && Number(existing.attempts) < 2) {
+          const r = await run(
+            `UPDATE public_replies
+                SET status = 'pending', attempts = attempts + 1, last_error = NULL,
+                    recipient_id = COALESCE(?, recipient_id)
+              WHERE comment_id = ? AND status = 'failed' AND attempts < 2`,
+            [recipientId || null, id]
+          );
+          return { claimed: r.changes > 0, row: await api.getPublicReply(id), retried: true };
+        }
+        return { claimed: false, row: existing };
+      }
+      const r = await run(
+        `INSERT OR IGNORE INTO public_replies (comment_id, account_id, recipient_id, status, attempts)
+         VALUES (?, ?, ?, 'pending', 1)`,
+        [id, accountId, recipientId || null]
+      );
+      return { claimed: r.changes > 0, row: await api.getPublicReply(id) };
+    },
+    async markPublicReplySent({ commentId, recipientId, source }) {
+      const now = nowSql();
+      await run(
+        `UPDATE public_replies
+            SET status = 'sent', sent_at = COALESCE(sent_at, ?), last_error = NULL,
+                recipient_id = COALESCE(?, recipient_id), source = COALESCE(?, source)
+          WHERE comment_id = ?`,
+        [now, recipientId || null, source || 'app', String(commentId)]
+      );
+      return api.getPublicReply(commentId);
+    },
+    async markPublicReplyFailed({ commentId, error }) {
+      await run(
+        `UPDATE public_replies
+            SET status = 'failed', last_error = ?
+          WHERE comment_id = ? AND status != 'sent'`,
+        [error || null, String(commentId)]
+      );
+      return api.getPublicReply(commentId);
+    },
+    async recordObservedPublicReply({ commentId, accountId, recipientId, source }) {
+      const now = nowSql();
+      await run(
+        `INSERT OR IGNORE INTO public_replies (comment_id, account_id, recipient_id, status, attempts, source, sent_at)
+         VALUES (?, ?, ?, 'sent', 1, ?, ?)`,
+        [String(commentId), accountId, recipientId || null, source || 'instagram', now]
+      );
+      await run(
+        `UPDATE public_replies
+            SET status = 'sent', sent_at = COALESCE(sent_at, ?), source = COALESCE(source, ?)
+          WHERE comment_id = ?`,
+        [now, source || 'instagram', String(commentId)]
+      );
+      return api.getPublicReply(commentId);
+    },
 
     async createRecipient(data) {
       const r = await run(
         `INSERT INTO recipients (
           automation_id, account_id, comment_id, igsid, username, comment_text, media_id,
-          status, opening_sent_at, click_id, last_user_interaction_at, awaiting_email
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          status, opening_sent_at, click_id, last_user_interaction_at, awaiting_email,
+          public_reply_sent_at, dm_sent_at, send_attempts, last_error
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           data.automation_id,
           data.account_id,
@@ -631,9 +809,79 @@ function buildApi(driver) {
           data.click_id || null,
           data.last_user_interaction_at || null,
           data.awaiting_email ? 1 : 0,
+          data.public_reply_sent_at || null,
+          data.dm_sent_at || null,
+          data.send_attempts || 0,
+          data.last_error || null,
         ]
       );
       return api.getRecipient(r.lastId);
+    },
+    async claimRecipient(data) {
+      const payload = {
+        automation_id: data.automation_id,
+        account_id: data.account_id,
+        comment_id: data.comment_id || null,
+        igsid: data.igsid || null,
+        username: data.username || null,
+        comment_text: data.comment_text || null,
+        media_id: data.media_id || null,
+        status: data.status || 'pending',
+        opening_sent_at: data.opening_sent_at || null,
+        click_id: data.click_id || null,
+        last_user_interaction_at: data.last_user_interaction_at || null,
+        awaiting_email: data.awaiting_email ? 1 : 0,
+        public_reply_sent_at: data.public_reply_sent_at || null,
+        dm_sent_at: data.dm_sent_at || null,
+        send_attempts: data.send_attempts || 0,
+        last_error: data.last_error || null,
+      };
+      try {
+        const r = await run(
+          `INSERT OR IGNORE INTO recipients (
+            automation_id, account_id, comment_id, igsid, username, comment_text, media_id,
+            status, opening_sent_at, click_id, last_user_interaction_at, awaiting_email,
+            public_reply_sent_at, dm_sent_at, send_attempts, last_error
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            payload.automation_id,
+            payload.account_id,
+            payload.comment_id,
+            payload.igsid,
+            payload.username,
+            payload.comment_text,
+            payload.media_id,
+            payload.status,
+            payload.opening_sent_at,
+            payload.click_id,
+            payload.last_user_interaction_at,
+            payload.awaiting_email,
+            payload.public_reply_sent_at,
+            payload.dm_sent_at,
+            payload.send_attempts,
+            payload.last_error,
+          ]
+        );
+        if (r.changes > 0 && r.lastId) {
+          return { claimed: true, recipient: await api.getRecipient(r.lastId) };
+        }
+      } catch (err) {
+        // unique conflict or dialect-specific ignore; fall through to lookup
+        if (!/unique|duplicate|constraint/i.test(String(err.message || err.code || ''))) throw err;
+      }
+      const existing = await api.findRecipientByCommentOrUser({
+        accountId: payload.account_id,
+        commentId: payload.comment_id,
+        igsid: payload.igsid,
+        username: payload.username,
+        automationId: payload.automation_id,
+      }) || await api.findRecipientByCommentOrUser({
+        accountId: payload.account_id,
+        commentId: payload.comment_id,
+        igsid: payload.igsid,
+        username: payload.username,
+      });
+      return { claimed: false, recipient: existing || null };
     },
     async getRecipient(id) {
       return get('SELECT * FROM recipients WHERE id = ?', [id]);
@@ -679,6 +927,8 @@ function buildApi(driver) {
       const allowed = [
         'status', 'opening_sent_at', 'button_pressed_at', 'second_sent_at', 'followup_sent_at',
         'click_id', 'clicked_at', 'email', 'awaiting_email', 'last_user_interaction_at', 'igsid',
+        'public_reply_sent_at', 'dm_sent_at', 'send_attempts', 'last_error', 'comment_id',
+        'username', 'comment_text', 'media_id',
       ];
       const sets = [];
       const vals = [];
@@ -795,7 +1045,7 @@ function buildApi(driver) {
 
 async function createDbFromDriver(driver) {
   await driver.exec(schemaSql(driver.dialect));
-  await migrateColumns(driver);
+  await migrateSchema(driver);
   return buildApi(driver);
 }
 
