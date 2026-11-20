@@ -1,0 +1,11 @@
+:root { --ink:#2B1C1F; --muted:#7A6A6E; --bg:#F7F3F0; --pink:#DD2A7B; --font:"Assistant","Segoe UI",Tahoma,sans-serif; }
+* { box-sizing: border-box; }
+body { margin:0; font-family:var(--font); background:var(--bg); color:var(--ink); line-height:1.65; }
+main { max-width: 720px; margin: 0 auto; padding: 32px 20px 64px; }
+h1 { font-size: 1.8rem; margin: 0 0 8px; }
+h2 { font-size: 1.15rem; margin: 28px 0 8px; }
+p, li { color: var(--ink); }
+.muted { color: var(--muted); }
+a { color: var(--pink); }
+nav { display:flex; gap:16px; flex-wrap:wrap; margin: 0 0 24px; }
+.lang { margin-top: 40px; padding-top: 24px; border-top: 1px solid #EDE4E0; }
