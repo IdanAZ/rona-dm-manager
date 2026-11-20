@@ -290,9 +290,10 @@ function navBtn(id, ic, label) {
 function canSendOpeningDm(item) {
   if (!item || !item.comment_id) return false;
   if (item.dm_ok) return false;
+  if (item.dm_status === 'handled_by_owner') return false;
   if (item.can_send === true) return true;
   if (item.can_send === false || item.already_recorded) return false;
-  if (item.dm_status === 'already_got_dm' || item.dm_status === 'not_eligible') return false;
+  if (item.dm_status === 'already_got_dm' || item.dm_status === 'not_eligible' || item.dm_status === 'handled_by_owner') return false;
   return !!item.within_private_reply_window && (item.dm_status === 'eligible_private_reply' || item.dm_status === 'unknown');
 }
 
@@ -388,6 +389,7 @@ function auditPill(item) {
   if (item.borderline && item.dm_status === 'already_got_dm') return h('span', { class: 'pill pill-border' }, 'גבולי — כבר קיבלה DM');
   if (item.borderline && item.borderline_reason === 'prior_dm_only') return h('span', { class: 'pill pill-border' }, 'גבולי — DM רק לפני התגובה');
   if (item.dm_status === 'already_got_dm') return h('span', { class: 'pill pill-ok' }, 'כבר קיבלה DM');
+  if (item.dm_status === 'handled_by_owner') return h('span', { class: 'pill pill-owner' }, 'טופל ע"י רונה');
   if (item.dm_status === 'eligible_private_reply') return h('span', { class: 'pill pill-wait' }, 'זכאית לתשובה פרטית');
   if (item.dm_status === 'not_eligible') return h('span', { class: 'pill pill-late' }, 'עברו 7 ימים');
   return h('span', { class: 'pill pill-unk' }, 'לא ידוע אם נשלח DM');
@@ -598,12 +600,14 @@ function renderAuditPage() {
   wrap.append(h('div', { class: 'audit-counts' },
     h('div', { class: 'audit-count' }, h('b', {}, String(c.total || 0)), h('span', {}, 'תגובות עם המילה')),
     h('div', { class: 'audit-count' }, h('b', {}, String(c.already_got_dm || 0)), h('span', {}, 'כבר קיבלו DM')),
+    h('div', { class: 'audit-count' }, h('b', {}, String(c.handled_by_owner || 0)), h('span', {}, 'טופל ע"י רונה')),
     h('div', { class: 'audit-count' }, h('b', {}, String(c.eligible_private_reply || 0)), h('span', {}, 'זכאים (עד 7 ימים)')),
     h('div', { class: 'audit-count' }, h('b', {}, String(c.not_eligible || 0)), h('span', {}, 'עברו 7 ימים')),
   ));
   const g = a.groups || {};
   for (const section of [
     renderAuditGroup('כבר קיבלו DM', g.already_got_dm),
+    renderAuditGroup('טופל ע"י רונה (יש תגובה בפוסט, בלי DM מהאפליקציה)', g.handled_by_owner),
     renderAuditGroup('זכאים לתשובה פרטית (פחות מ־7 ימים, בלי DM אחרי התגובה)', g.eligible_private_reply),
     renderAuditGroup('לא זכאים לתשובה פרטית (עברו 7 ימים)', g.not_eligible),
     renderAuditGroup('לא ידוע — לא הצלחנו לקרוא שיחות', g.unknown_dm),
