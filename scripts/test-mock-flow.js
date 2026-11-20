@@ -178,6 +178,32 @@ async function main() {
   if (mine.length) fail('follow-up should not send after click');
   else console.log('✓ follow-up skipped after click');
 
+  // 9b. Manual opening DM from the audit tab (idempotent, no public reply)
+  const hakanaAuto = await req('POST', '/api/automations', {
+    name: 'הכנה ידנית',
+    status: 'live',
+    trigger_scope: 'specific',
+    media_id: 'mock_media_hakana',
+    keyword_mode: 'keywords',
+    keywords: 'הכנה',
+    match_type: 'whole_word',
+    public_reply_enabled: true,
+    public_reply_variants: ['שלחתי לך בפרטי ❤️'],
+    opening_dm_enabled: true,
+    opening_dm_text: 'היי, איזה כיף שאת מתעניינת בקורס הכנה ללידה שלי! ❤️',
+    opening_dm_button_label: 'כן, אשמח ❤️',
+  });
+  if (hakanaAuto.status !== 201) fail('hakana automation failed ' + JSON.stringify(hakanaAuto.json));
+  const send1 = await req('POST', '/api/audit/keyword-comments/mock_c_tamar/send', { media_id: 'mock_media_hakana' });
+  if (send1.status !== 200 || !send1.json?.ok) fail('manual send failed: ' + JSON.stringify(send1.json));
+  else console.log('✓ manual opening DM sent to mock_c_tamar');
+  const send2 = await req('POST', '/api/audit/keyword-comments/mock_c_tamar/send', { media_id: 'mock_media_hakana' });
+  if (send2.status !== 409 || send2.json?.error !== 'already_sent') fail('idempotent resend expected 409: ' + JSON.stringify(send2.json));
+  else console.log('✓ manual send is idempotent (no second DM)');
+  const sendOld = await req('POST', '/api/audit/keyword-comments/mock_c_shira/send', { media_id: 'mock_media_hakana' });
+  if (sendOld.status !== 400 || sendOld.json?.error !== 'comment_too_old') fail('expired comment should be refused: ' + JSON.stringify(sendOld.json));
+  else console.log('✓ expired comment refused without a send');
+
   // 10. Second user cannot see first account automations (isolation via session)
   jar.clear();
   await req('POST', '/auth/mock-login', { username: 'other_user' });

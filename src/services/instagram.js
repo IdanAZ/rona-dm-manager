@@ -571,6 +571,43 @@ function createInstagramClient({ config, db }) {
       );
     },
 
+    async getComment(account, commentId) {
+      return withAccount(
+        account,
+        async (acc) => graphFetch(
+          graphUrl(config, `/${commentId}`, {
+            fields: 'id,text,username,timestamp,from,media',
+          }, acc),
+          { token: apiToken(acc) }
+        ),
+        () => {
+          const id = String(commentId || '');
+          const pool = [];
+          for (const c of MOCK_AUDIT_COMMENTS) {
+            pool.push({ ...c, media: c.media || { id: MOCK_AUDIT_MEDIA.id } });
+            for (const r of c.replies || []) {
+              pool.push({
+                ...r,
+                parent_id: r.parent_id || c.id,
+                media: r.media || { id: MOCK_AUDIT_MEDIA.id },
+                replies: [],
+              });
+            }
+          }
+          const found = pool.find((c) => String(c.id) === id);
+          if (!found) {
+            const err = new Error('comment_not_found');
+            err.status = 404;
+            throw err;
+          }
+          return {
+            ...found,
+            replies: (found.replies || []).map((r) => ({ ...r })),
+          };
+        }
+      );
+    },
+
     async listConversationsWithMessages(account, { participantKeys } = {}) {
       return withAccount(
         account,

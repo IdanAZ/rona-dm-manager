@@ -15,6 +15,7 @@ const state = {
   auditLoading: false,
   auditError: '',
   auditKeyword: 'הכנה',
+  auditAction: {},
 };
 
 if ('serviceWorker' in navigator) {
@@ -282,6 +283,41 @@ function navBtn(id, ic, label) {
 }
 
 
+function canSendOpeningDm(item) {
+  if (!item || !item.comment_id) return false;
+  if (item.can_send === true) return true;
+  if (item.can_send === false || item.already_recorded) return false;
+  if (item.dm_status === 'already_got_dm' || item.dm_status === 'not_eligible') return false;
+  return !!item.within_private_reply_window && (item.dm_status === 'eligible_private_reply' || item.dm_status === 'unknown');
+}
+
+async function sendOpeningDm(item) {
+  const who = item.username ? '@' + item.username : 'המגיבה';
+  if (!confirm(`לשלוח ל-${who} את הודעת הפתיחה של האוטומציה?`)) return;
+  state.auditAction = { ...(state.auditAction || {}), [item.comment_id]: { loading: true, text: '' } };
+  render();
+  try {
+    const res = await fetch(`/api/audit/keyword-comments/${encodeURIComponent(item.comment_id)}/send`, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ media_id: state.audit?.media?.id || undefined }),
+    });
+    const data = await res.json().catch(() => ({}));
+    const text = data.message || data.error || (res.ok ? 'ההודעה נשלחה' : 'השליחה נכשלה');
+    const ok = res.ok && data.ok;
+    if (ok) {
+      item.can_send = false;
+      item.already_recorded = true;
+      item.dm_status = item.dm_status === 'unknown' ? 'unknown' : item.dm_status;
+    }
+    state.auditAction[item.comment_id] = { loading: false, text, error: !ok };
+  } catch (err) {
+    state.auditAction[item.comment_id] = { loading: false, text: err.message || 'השליחה נכשלה', error: true };
+  }
+  render();
+}
+
 async function runAudit() {
   state.auditLoading = true;
   state.auditError = '';
@@ -326,6 +362,8 @@ function reasonLabel(reason) {
 }
 
 function renderAuditItem(item) {
+  const action = (state.auditAction || {})[item.comment_id] || {};
+  const showSend = canSendOpeningDm(item) && !action.loading;
   return h('div', { class: 'audit-item' },
     h('div', { class: 'row' },
       atUser(item.username || 'unknown'),
@@ -339,6 +377,14 @@ function renderAuditItem(item) {
     sourceLabel(item) ? h('div', { class: 'muted' }, sourceLabel(item)) : null,
     item.borderline && item.borderline_reason ? h('div', { class: 'muted' }, reasonLabel(item.borderline_reason)) : null,
     item.dm_snippet ? h('div', { class: 'snippet' }, `קטע מה-DM: “${item.dm_snippet}”`) : null,
+    (showSend || action.loading || action.text) ? h('div', { class: 'audit-actions' },
+      showSend || action.loading ? h('button', {
+        class: 'btn btn-sm',
+        disabled: !!action.loading,
+        onClick: () => sendOpeningDm(item),
+      }, action.loading ? 'שולחת…' : 'שליחת ההודעה') : null,
+      action.text ? h('div', { class: action.error ? 'audit-result is-error' : 'audit-result is-ok' }, action.text) : null,
+    ) : null,
   );
 }
 
@@ -354,7 +400,7 @@ function renderAuditPage() {
   const wrap = h('div', {});
   wrap.append(
     h('div', { class: 'page-head' }, h('h2', {}, 'מי כבר קיבל הודעה')),
-    h('p', { class: 'audit-note' }, 'בדיקה לקריאה בלבד: התגובות עם מילת המפתח, והאם רונה כבר שלחה DM (גם ידני). לא נשלחות הודעות מכאן.'),
+    h('p', { class: 'audit-note' }, 'כאן רואים מי הגיבה עם מילת המפתח, והאם כבר נשלחה לה הודעה. למי שזכאית אפשר לשלוח ידנית את הודעת הפתיחה, אחרי אישור. מי שכבר קיבלה לא תישלח שוב.'),
     h('div', { class: 'audit-controls' },
       h('input', {
         value: state.auditKeyword,
@@ -391,13 +437,15 @@ function renderAuditPage() {
     h('div', { class: 'audit-count' }, h('b', {}, String(c.not_eligible || 0)), h('span', {}, 'עברו 7 ימים')),
   ));
   const g = a.groups || {};
-  wrap.append(
+  for (const section of [
     renderAuditGroup('כבר קיבלו DM', g.already_got_dm),
     renderAuditGroup('זכאים לתשובה פרטית (פחות מ־7 ימים, בלי DM אחרי התגובה)', g.eligible_private_reply),
     renderAuditGroup('לא זכאים לתשובה פרטית (עברו 7 ימים)', g.not_eligible),
     renderAuditGroup('לא ידוע — לא הצלחנו לקרוא שיחות', g.unknown_dm),
     renderAuditGroup('מקרים גבוליים', g.borderline),
-  );
+  ]) {
+    if (section) wrap.append(section);
+  }
   return wrap;
 }
 

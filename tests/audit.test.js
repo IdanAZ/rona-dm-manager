@@ -1,5 +1,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
+const http = require('http');
+const { once } = require('events');
 const {
   matchesAuditKeyword,
   captionStartsWith,
@@ -11,6 +13,12 @@ const {
   buildAudit,
   PRIVATE_REPLY_WINDOW_MS,
 } = require('../src/lib/audit');
+const { createDb } = require('../src/db');
+const { createInstagramClient } = require('../src/services/instagram');
+const { createEngine } = require('../src/services/engine');
+const { createApp } = require('../src/app');
+const { sendManualOpeningDm } = require('../src/services/commentAudit');
+const { processPayload, mockCommentPayload } = require('../src/routes/webhooks');
 
 const ACCOUNT = { username: 'ronaazarya_midwife', ig_user_id: '17841401150112850' };
 const NOW = new Date('2026-11-20T13:50:00Z');
@@ -209,4 +217,199 @@ test('when conversations API is unavailable, comments stay unknown and are flagg
   assert.equal(result.items[0].dm_status, 'unknown');
   assert.equal(result.items[0].borderline_reason, 'conversations_unavailable');
   assert.equal(result.conversations_available, false);
+});
+
+
+const OPENING_TEXT = 'היי, איזה כיף שאת מתעניינת בקורס הכנה ללידה שלי! ❤️';
+
+async function setupManualSend() {
+  const db = await createDb(':memory:');
+  const config = {
+    mockMode: true,
+    appUrl: 'http://localhost:3000',
+    followCheckMode: 'stub',
+    sessionSecret: 'test-secret',
+    sessionTtlDays: 30,
+    authMode: 'facebook',
+    meta: { apiVersion: 'v23.0', appId: '', appSecret: '', scopes: [] },
+  };
+  const instagram = createInstagramClient({ config, db });
+  const engine = createEngine({ db, instagram, config });
+  const userId = await db.createUser();
+  const account = await db.upsertAccount({
+    userId,
+    igUserId: 'mock_ig_rona_demo',
+    username: 'rona_demo',
+    name: 'רונה',
+    accessToken: 'mock-token',
+    accountType: 'MEDIA_CREATOR',
+  });
+  const auto = await db.createAutomation({
+    account_id: account.id,
+    name: 'הכנה',
+    status: 'live',
+    trigger_scope: 'specific',
+    media_id: 'mock_media_hakana',
+    keyword_mode: 'keywords',
+    keywords: 'הכנה',
+    match_type: 'whole_word',
+    public_reply_enabled: 1,
+    public_reply_variants: JSON.stringify(['שלחתי לך בפרטי ❤️']),
+    opening_dm_enabled: 1,
+    opening_dm_text: OPENING_TEXT,
+    opening_dm_button_label: 'כן, אשמח ❤️',
+  });
+  return { db, config, instagram, engine, account, auto };
+}
+
+test('manual opening DM sends text only, records a recipient, and is idempotent', async () => {
+  const { db, instagram, account, auto } = await setupManualSend();
+  const now = new Date('2026-11-20T13:50:00Z');
+  const first = await sendManualOpeningDm({
+    db,
+    instagram,
+    account,
+    commentId: 'mock_c_tamar',
+    now,
+  });
+  assert.equal(first.ok, true);
+  assert.equal(first.message, 'ההודעה נשלחה');
+  assert.equal(first.automation_id, auto.id);
+  assert.ok(first.recipient_id);
+
+  const recs = await db.listRecipients(auto.id);
+  assert.equal(recs.length, 1);
+  assert.equal(recs[0].comment_id, 'mock_c_tamar');
+  assert.equal(recs[0].username, 'tamar_eligible');
+  assert.equal(recs[0].status, 'opening_sent');
+  assert.ok(recs[0].opening_sent_at);
+
+  const logs = await db.listOutbound({ accountId: account.id, limit: 20 });
+  const privates = logs.filter((l) => l.type === 'private_reply');
+  assert.equal(privates.length, 1);
+  assert.equal(logs.some((l) => l.type === 'comment_reply'), false);
+  const payload = JSON.parse(privates[0].payload);
+  assert.equal(payload.body.message.text, OPENING_TEXT);
+  assert.equal(payload.body.recipient.comment_id, 'mock_c_tamar');
+  assert.equal(payload.body.message.quick_replies, undefined);
+
+  const second = await sendManualOpeningDm({
+    db,
+    instagram,
+    account,
+    commentId: 'mock_c_tamar',
+    now,
+  });
+  assert.equal(second.ok, false);
+  assert.equal(second.error, 'already_sent');
+  assert.equal(second.status, 409);
+  assert.equal(second.recipient_id, first.recipient_id);
+  assert.equal((await db.listRecipients(auto.id)).length, 1);
+  assert.equal((await db.listOutbound({ accountId: account.id, limit: 20 })).filter((l) => l.type === 'private_reply').length, 1);
+
+  // same commenter, even if the webhook fires later, must not send again
+  const engine = createEngine({ db, instagram, config: { mockMode: true, appUrl: 'http://localhost:3000', followCheckMode: 'stub', meta: { apiVersion: 'v23.0' } } });
+  const hooked = await processPayload(
+    mockCommentPayload({
+      igUserId: account.ig_user_id,
+      commentId: 'mock_c_tamar_later',
+      text: 'הכנה',
+      mediaId: auto.media_id,
+      fromId: 'id_tamar',
+      fromUsername: 'tamar_eligible',
+    }),
+    { db, engine }
+  );
+  assert.equal(hooked[0].skipped, true);
+  assert.equal(hooked[0].reason, 'already_recipient');
+  assert.equal((await db.listRecipients(auto.id)).length, 1);
+  await db.close();
+});
+
+test('manual opening DM refuses comments older than 7 days without sending', async () => {
+  const { db, instagram, account, auto } = await setupManualSend();
+  const now = new Date('2026-11-20T13:50:00Z');
+  const result = await sendManualOpeningDm({
+    db,
+    instagram,
+    account,
+    commentId: 'mock_c_shira',
+    now,
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.error, 'comment_too_old');
+  assert.equal((await db.listRecipients(auto.id)).length, 0);
+  const logs = await db.listOutbound({ accountId: account.id, limit: 20 });
+  assert.equal(logs.filter((l) => l.type === 'private_reply').length, 0);
+  await db.close();
+});
+
+test('POST /api/audit/keyword-comments/:commentId/send is authenticated, idempotent, and skips expired comments', async () => {
+  const { db, config, instagram, engine, account, auto } = await setupManualSend();
+  const app = createApp({ db, config, instagram, engine });
+  const server = http.createServer(app);
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  try {
+  const { port } = server.address();
+  const base = `http://127.0.0.1:${port}`;
+  const jar = new Map();
+  function cookieHeader() {
+    return [...jar.entries()].map(([k, v]) => `${k}=${v}`).join('; ');
+  }
+  function storeCookies(res) {
+    const raw = res.headers.getSetCookie?.() || res.headers.get('set-cookie');
+    const list = Array.isArray(raw) ? raw : raw ? [raw] : [];
+    for (const c of list) {
+      const [nv] = c.split(';');
+      const eq = nv.indexOf('=');
+      jar.set(nv.slice(0, eq).trim(), nv.slice(eq + 1));
+    }
+  }
+  async function req(method, url, body) {
+    const res = await fetch(base + url, {
+      method,
+      headers: {
+        ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+        Cookie: cookieHeader(),
+      },
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+    });
+    storeCookies(res);
+    return { status: res.status, json: await res.json().catch(() => ({})) };
+  }
+
+  const unauth = await req('POST', '/api/audit/keyword-comments/mock_c_tamar/send', {});
+  assert.equal(unauth.status, 401);
+
+  const login = await req('POST', '/auth/mock-login', { username: 'rona_demo' });
+  assert.equal(login.json.ok, true);
+
+  const first = await req('POST', '/api/audit/keyword-comments/mock_c_tamar/send', { media_id: 'mock_media_hakana' });
+  assert.equal(first.status, 200);
+  assert.equal(first.json.ok, true);
+  assert.equal(first.json.message, 'ההודעה נשלחה');
+  assert.equal(first.json.automation_id, auto.id);
+
+  const second = await req('POST', '/api/audit/keyword-comments/mock_c_tamar/send', { media_id: 'mock_media_hakana' });
+  assert.equal(second.status, 409);
+  assert.equal(second.json.error, 'already_sent');
+  assert.equal((await db.listRecipients(auto.id)).length, 1);
+
+  const expired = await req('POST', '/api/audit/keyword-comments/mock_c_shira/send', { media_id: 'mock_media_hakana' });
+  assert.equal(expired.status, 400);
+  assert.equal(expired.json.error, 'comment_too_old');
+
+  const audit = await req('GET', '/api/audit/keyword-comments?keyword=' + encodeURIComponent('הכנה'));
+  assert.equal(audit.status, 200);
+  const tamar = audit.json.items.find((i) => i.comment_id === 'mock_c_tamar');
+  const shira = audit.json.items.find((i) => i.comment_id === 'mock_c_shira');
+  assert.equal(tamar.already_recorded, true);
+  assert.equal(tamar.can_send, false);
+  assert.equal(shira.can_send, false);
+
+  } finally {
+    server.close();
+    await db.close();
+  }
 });

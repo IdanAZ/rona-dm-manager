@@ -1,4 +1,4 @@
-const CACHE = 'rona-insta-v2';
+const CACHE = 'rona-insta-v3';
 const SHELL = ['/', '/index.html', '/styles.css', '/app.js', '/manifest.json', '/icons/icon-192.png', '/icons/icon-512.png'];
 
 self.addEventListener('install', (event) => {

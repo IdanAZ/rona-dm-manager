@@ -70,6 +70,27 @@ function createEngine({ db, instagram, config }) {
       return { skipped: true, reason: 'no_match' };
     }
 
+    const existingRecipient = await db.findRecipientByCommentOrUser({
+      accountId: account.id,
+      commentId,
+      igsid,
+      username,
+    });
+    if (existingRecipient) {
+      await db.markCommentProcessed({
+        commentId,
+        accountId: account.id,
+        automationId: matched.id,
+        reason: 'already_recipient',
+      });
+      return {
+        skipped: true,
+        reason: 'already_recipient',
+        automationId: matched.id,
+        recipientId: existingRecipient.id,
+      };
+    }
+
     // Mark early to avoid double-processing if two webhooks race.
     await db.markCommentProcessed({
       commentId,

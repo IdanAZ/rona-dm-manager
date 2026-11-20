@@ -3,7 +3,7 @@ const { requireAuth, requireAccount, publicAccount } = require('./auth');
 const { processPayload, mockCommentPayload, mockPostbackPayload, mockMessagePayload } = require('./webhooks');
 const { randomId } = require('../lib/signatures');
 const { nowSql } = require('../db');
-const { collectKeywordCommentAudit } = require('../services/commentAudit');
+const { collectKeywordCommentAudit, attachRecipientFlags, sendManualOpeningDm } = require('../services/commentAudit');
 
 function asBool(v, fallback = false) {
   if (v === undefined || v === null || v === '') return fallback;
@@ -98,10 +98,26 @@ function createApiRouter({ db, config, instagram, engine }) {
         captionPrefix: req.query.caption_prefix,
         mediaId: req.query.media_id,
       });
+      if (result.ok) await attachRecipientFlags(db, req.account, result);
       const status = result.ok ? 200 : (result.error === 'media_not_found' ? 404 : 502);
       res.status(status).json(result);
     } catch (err) {
       res.status(502).json({ ok: false, error: err.message });
+    }
+  });
+
+  router.post('/audit/keyword-comments/:commentId/send', requireAccount, async (req, res, next) => {
+    try {
+      const result = await sendManualOpeningDm({
+        db,
+        instagram,
+        account: req.account,
+        commentId: req.params.commentId,
+        mediaId: req.body?.media_id || req.body?.mediaId,
+      });
+      res.status(result.status || (result.ok ? 200 : 400)).json(result);
+    } catch (err) {
+      next(err);
     }
   });
 

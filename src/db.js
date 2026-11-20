@@ -649,6 +649,32 @@ function buildApi(driver) {
         [accountId, String(igsid)]
       );
     },
+    async findRecipientByCommentOrUser({ accountId, commentId, igsid, username, automationId } = {}) {
+      const clauses = ['account_id = ?'];
+      const params = [accountId];
+      if (automationId) {
+        clauses.push('automation_id = ?');
+        params.push(automationId);
+      }
+      const or = [];
+      if (commentId) {
+        or.push('comment_id = ?');
+        params.push(String(commentId));
+      }
+      if (igsid) {
+        or.push('igsid = ?');
+        params.push(String(igsid));
+      }
+      if (username) {
+        or.push('LOWER(username) = LOWER(?)');
+        params.push(String(username));
+      }
+      if (!or.length) return null;
+      return get(
+        `SELECT * FROM recipients WHERE ${clauses.join(' AND ')} AND (${or.join(' OR ')}) ORDER BY id DESC LIMIT 1`,
+        params
+      );
+    },
     async updateRecipient(id, data) {
       const allowed = [
         'status', 'opening_sent_at', 'button_pressed_at', 'second_sent_at', 'followup_sent_at',
