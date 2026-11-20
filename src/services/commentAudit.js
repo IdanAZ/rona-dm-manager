@@ -26,9 +26,13 @@ function authorKeys(comments, account) {
 }
 
 async function collectKeywordCommentAudit(instagram, account, query = {}) {
-  const keyword = query.keyword || DEFAULT_KEYWORD;
-  const captionPrefix = query.captionPrefix || query.caption_prefix || DEFAULT_CAPTION_PREFIX;
   const mediaId = query.mediaId || query.media_id || '';
+  const keyword = query.keyword || DEFAULT_KEYWORD;
+  const explicitPrefix = query.captionPrefix != null ? query.captionPrefix : query.caption_prefix;
+  // When a media id is provided, do not fall back to the הכנה caption prefix.
+  const captionPrefix = mediaId
+    ? (explicitPrefix || '')
+    : (explicitPrefix || DEFAULT_CAPTION_PREFIX);
   const now = query.now || new Date();
   const errors = [];
 
@@ -95,6 +99,7 @@ async function collectKeywordCommentAudit(instagram, account, query = {}) {
     keyword,
     now,
     conversationsAvailable,
+    matchComment: query.matchComment,
   });
 
   return {
@@ -106,6 +111,112 @@ async function collectKeywordCommentAudit(instagram, account, query = {}) {
   };
 }
 
+
+
+function tagAuditItems(result, automation, media) {
+  if (!result || !Array.isArray(result.items)) return result;
+  const mediaInfo = media || result.media || null;
+  for (const item of result.items) {
+    item.automation_id = automation.id;
+    item.automation_name = automation.name;
+    item.media_id = automation.media_id || mediaInfo?.id || item.media_id || null;
+    item.media_permalink = automation.media_permalink || mediaInfo?.permalink || item.media_permalink || null;
+    item.media_caption = automation.media_caption || mediaInfo?.caption || item.media_caption || null;
+  }
+  return result;
+}
+
+async function collectAutomationAudit(instagram, account, automation, query = {}) {
+  const result = await collectKeywordCommentAudit(instagram, account, {
+    mediaId: automation.media_id,
+    captionPrefix: '',
+    keyword: query.keyword || automation.keywords || DEFAULT_KEYWORD,
+    now: query.now,
+    matchComment: (text) => matchesComment({
+      text,
+      keywordMode: automation.keyword_mode,
+      keywords: automation.keywords,
+      matchType: automation.match_type,
+    }),
+  });
+  return tagAuditItems(result, automation, result.media);
+}
+
+async function collectAutomationsCommentAudit(instagram, account, query = {}) {
+  const db = query.db;
+  if (!db) {
+    return collectKeywordCommentAudit(instagram, account, query);
+  }
+  const rawId = query.automationId || query.automation_id || 'all';
+  let automations;
+  if (rawId && String(rawId) !== 'all') {
+    const auto = await db.getAutomation(rawId);
+    if (!auto || Number(auto.account_id) !== Number(account.id)) {
+      return {
+        ok: false,
+        error: 'automation_not_found',
+        message: 'האוטומציה לא נמצאה.',
+        items: [],
+        groups: {},
+        counts: { total: 0 },
+        errors: [],
+      };
+    }
+    automations = [auto];
+  } else {
+    automations = (await db.listAutomations(account.id)).filter((a) => a.media_id);
+  }
+
+  const items = [];
+  const errors = [];
+  const scanned = [];
+  const seen = new Set();
+  for (const automation of automations) {
+    const one = await collectAutomationAudit(instagram, account, automation, query);
+    if (one.errors && one.errors.length) errors.push(...one.errors);
+    scanned.push({
+      id: automation.id,
+      name: automation.name,
+      media_id: automation.media_id,
+      media_permalink: automation.media_permalink || one.media?.permalink || null,
+      media_caption: automation.media_caption || one.media?.caption || null,
+      ok: !!one.ok,
+      error: one.ok ? null : (one.error || one.message || null),
+    });
+    if (!one.ok && one.error && one.error !== 'media_not_found') {
+      // still surface any items if present
+    }
+    for (const item of one.items || []) {
+      const key = String(item.comment_id);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      items.push(item);
+    }
+  }
+
+  const result = {
+    ok: true,
+    keyword: query.keyword || null,
+    automation_id: String(rawId || 'all'),
+    automations: scanned,
+    media: scanned.length === 1 ? {
+      id: scanned[0].media_id,
+      caption: scanned[0].media_caption,
+      permalink: scanned[0].media_permalink,
+    } : null,
+    items,
+    errors,
+  };
+  return regroupAuditItems(result);
+}
+
+async function collectCommentAudit(instagram, account, query = {}, db) {
+  const automationId = query.automationId || query.automation_id;
+  if (db && automationId) {
+    return collectAutomationsCommentAudit(instagram, account, { ...query, db, automationId });
+  }
+  return collectKeywordCommentAudit(instagram, account, query);
+}
 
 async function loadComment(instagram, account, commentId, mediaId) {
   const id = String(commentId || '');
@@ -151,6 +262,12 @@ async function attachRecipientFlags(db, account, result) {
   if (!result || !Array.isArray(result.items) || !db) return result;
   for (const item of result.items) {
     const existing = await db.findRecipientByCommentOrUser({
+      accountId: account.id,
+      commentId: item.comment_id,
+      igsid: item.igsid,
+      username: item.username,
+      automationId: item.automation_id,
+    }) || await db.findRecipientByCommentOrUser({
       accountId: account.id,
       commentId: item.comment_id,
       igsid: item.igsid,
@@ -413,6 +530,8 @@ async function sendMissingPublicReply({ db, instagram, engine, account, commentI
 
 module.exports = {
   collectKeywordCommentAudit,
+  collectAutomationsCommentAudit,
+  collectCommentAudit,
   authorKeys,
   attachRecipientFlags,
   regroupAuditItems,

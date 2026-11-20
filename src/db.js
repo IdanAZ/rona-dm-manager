@@ -222,6 +222,11 @@ CREATE TABLE IF NOT EXISTS pending_connections (
   created_at TEXT NOT NULL DEFAULT (${now})
 );
 
+`;
+}
+
+function schemaIndexSql() {
+  return `
 CREATE INDEX IF NOT EXISTS idx_accounts_user ON accounts(user_id);
 CREATE INDEX IF NOT EXISTS idx_automations_account ON automations(account_id);
 CREATE INDEX IF NOT EXISTS idx_recipients_auto ON recipients(automation_id);
@@ -328,10 +333,10 @@ function createPostgresDriver(connectionString) {
       if (!/^[a-z_]+$/.test(table)) throw new Error('invalid table');
       const res = await pool.query(
         `SELECT column_name FROM information_schema.columns
-         WHERE table_name = $1`,
+         WHERE table_schema = current_schema() AND table_name = $1`,
         [table]
       );
-      return res.rows.map((r) => r.column_name);
+      return res.rows.map((r) => String(r.column_name));
     },
   };
 }
@@ -355,14 +360,50 @@ async function migrateColumns(driver) {
 async function migrateSchema(driver) {
   await migrateColumns(driver);
   await addColumnIfMissing(driver, 'accounts', 'comment_poller_enabled', 'INTEGER NOT NULL DEFAULT 1');
-  await addColumnIfMissing(driver, 'recipients', 'public_reply_sent_at', 'TEXT');
-  await addColumnIfMissing(driver, 'recipients', 'dm_sent_at', 'TEXT');
-  await addColumnIfMissing(driver, 'recipients', 'send_attempts', 'INTEGER NOT NULL DEFAULT 0');
-  await addColumnIfMissing(driver, 'recipients', 'last_error', 'TEXT');
+  const recipientColumns = {
+    comment_text: 'TEXT',
+    media_id: 'TEXT',
+    status: "TEXT NOT NULL DEFAULT 'opening_sent'",
+    button_pressed_at: 'TEXT',
+    second_sent_at: 'TEXT',
+    followup_sent_at: 'TEXT',
+    click_id: 'TEXT',
+    clicked_at: 'TEXT',
+    email: 'TEXT',
+    awaiting_email: 'INTEGER NOT NULL DEFAULT 0',
+    last_user_interaction_at: 'TEXT',
+    public_reply_sent_at: 'TEXT',
+    dm_sent_at: 'TEXT',
+    send_attempts: 'INTEGER NOT NULL DEFAULT 0',
+    last_error: 'TEXT',
+    created_at: 'TEXT',
+  };
+  for (const [name, typ] of Object.entries(recipientColumns)) {
+    await addColumnIfMissing(driver, 'recipients', name, typ);
+  }
+  try {
+    await driver.exec('UPDATE accounts SET comment_poller_enabled = 1 WHERE comment_poller_enabled IS NULL');
+  } catch (err) {
+    console.warn('[db] comment_poller_enabled backfill skipped:', err.message);
+  }
   const now = driver.dialect === 'postgres'
     ? "TO_CHAR(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')"
     : "datetime('now')";
   await driver.exec(`
+CREATE TABLE IF NOT EXISTS processed_comments (
+  comment_id TEXT PRIMARY KEY,
+  account_id INTEGER NOT NULL,
+  automation_id INTEGER,
+  reason TEXT,
+  processed_at TEXT NOT NULL DEFAULT (${now})
+);
+CREATE TABLE IF NOT EXISTS private_replies (
+  comment_id TEXT PRIMARY KEY,
+  account_id INTEGER NOT NULL,
+  recipient_igsid TEXT,
+  message_id TEXT,
+  sent_at TEXT NOT NULL DEFAULT (${now})
+);
 CREATE TABLE IF NOT EXISTS public_replies (
   comment_id TEXT PRIMARY KEY,
   account_id INTEGER NOT NULL,
@@ -1003,7 +1044,14 @@ function buildApi(driver) {
     },
     async listOutbound({ accountId, limit = 50 }) {
       return all(
-        'SELECT * FROM outbound_log WHERE account_id = ? ORDER BY id DESC LIMIT ?',
+        `SELECT o.*, a.name AS automation_name,
+                COALESCE(r.username, '') AS recipient_username
+           FROM outbound_log o
+           LEFT JOIN automations a ON a.id = o.automation_id
+           LEFT JOIN recipients r ON r.id = o.recipient_id
+          WHERE o.account_id = ?
+          ORDER BY o.id DESC
+          LIMIT ?`,
         [accountId, limit]
       );
     },
@@ -1043,9 +1091,24 @@ function buildApi(driver) {
   return api;
 }
 
+async function applyIndexes(driver) {
+  const parts = String(schemaIndexSql())
+    .split(/;\s*(?:\n|$)/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  for (const part of parts) {
+    try {
+      await driver.exec(part);
+    } catch (err) {
+      console.warn('[db] index migration skipped:', err.message);
+    }
+  }
+}
+
 async function createDbFromDriver(driver) {
   await driver.exec(schemaSql(driver.dialect));
   await migrateSchema(driver);
+  await applyIndexes(driver);
   return buildApi(driver);
 }
 

@@ -425,3 +425,89 @@ test('POST /api/audit/keyword-comments/:commentId/send is authenticated, idempot
     await db.close();
   }
 });
+
+test('audit by automation_id uses that post, not the default הכנה caption prefix', async () => {
+  const { collectCommentAudit, attachRecipientFlags } = require('../src/services/commentAudit');
+  const db = await createDb(':memory:');
+  const userId = await db.createUser();
+  const account = await db.upsertAccount({
+    userId,
+    igUserId: 'ig_audit_scope',
+    username: 'rona_demo',
+    name: 'רונה',
+    accessToken: 'mock-token',
+    accountType: 'MEDIA_CREATOR',
+  });
+  const hakana = await db.createAutomation({
+    account_id: account.id,
+    name: 'הכנה',
+    status: 'live',
+    trigger_scope: 'specific',
+    media_id: 'media_hakana',
+    media_permalink: 'https://instagram.com/p/hakana',
+    media_caption: 'הגיבי "הכנה" ואשלח לך את כל הפרטים❤️',
+    keyword_mode: 'keywords',
+    keywords: 'הכנה',
+    match_type: 'whole_word',
+  });
+  const cake = await db.createAutomation({
+    account_id: account.id,
+    name: 'עוגה',
+    status: 'live',
+    trigger_scope: 'specific',
+    media_id: 'media_cake',
+    media_permalink: 'https://instagram.com/reel/cake',
+    media_caption: 'ריל על אפידורל — הגיבי עוגה',
+    keyword_mode: 'keywords',
+    keywords: 'עוגה',
+    match_type: 'whole_word',
+  });
+  const now = new Date('2026-11-20T13:50:00Z');
+  const instagram = {
+    async findMedia(_account, { mediaId }) {
+      if (mediaId === 'media_hakana') return { id: 'media_hakana', caption: hakana.media_caption, permalink: hakana.media_permalink };
+      if (mediaId === 'media_cake') return { id: 'media_cake', caption: cake.media_caption, permalink: cake.media_permalink };
+      return null;
+    },
+    async listMediaComments(_account, mediaId) {
+      if (mediaId === 'media_hakana') {
+        return [{ id: 'c_prep', text: 'הכנה', username: 'maya', timestamp: now.toISOString(), from: { id: '1', username: 'maya' }, replies: [] }];
+      }
+      if (mediaId === 'media_cake') {
+        return [{ id: 'c_cake', text: 'עוגה', username: 'noa', timestamp: now.toISOString(), from: { id: '2', username: 'noa' }, replies: [] }];
+      }
+      return [];
+    },
+    async listConversationsWithMessages() {
+      return { ok: false, conversations: [], errors: [], tried: [] };
+    },
+  };
+
+  const cakeOnly = await collectCommentAudit(instagram, account, { automationId: cake.id, now }, db);
+  assert.equal(cakeOnly.ok, true);
+  assert.equal(cakeOnly.items.length, 1);
+  assert.equal(cakeOnly.items[0].comment_id, 'c_cake');
+  assert.equal(cakeOnly.items[0].username, 'noa');
+  assert.equal(cakeOnly.items[0].automation_name, 'עוגה');
+  assert.equal(cakeOnly.items.some((i) => i.comment_id === 'c_prep'), false);
+
+  const all = await collectCommentAudit(instagram, account, { automationId: 'all', now }, db);
+  assert.equal(all.ok, true);
+  assert.equal(all.items.length, 2);
+  assert.deepEqual(all.items.map((i) => i.comment_id).sort(), ['c_cake', 'c_prep']);
+  assert.equal(all.automations.length, 2);
+
+  // Legacy keyword+caption_prefix path is unchanged and still targets the הכנה post when no automation_id is sent.
+  const instagramLegacy = createInstagramClient({
+    config: { mockMode: true, appUrl: 'http://localhost:3000', followCheckMode: 'stub', meta: { apiVersion: 'v23.0', appId: '', appSecret: '', scopes: [] } },
+    db,
+  });
+  const { collectKeywordCommentAudit } = require('../src/services/commentAudit');
+  const legacy = await collectKeywordCommentAudit(instagramLegacy, account, { keyword: 'עוגה' });
+  // default caption prefix points at the הכנה mock post, so "עוגה" should not match those comments
+  assert.equal(legacy.ok, true);
+  assert.equal((legacy.items || []).length, 0);
+
+  await attachRecipientFlags(db, account, cakeOnly);
+  await db.close();
+});
