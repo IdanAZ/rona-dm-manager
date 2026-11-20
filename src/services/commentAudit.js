@@ -239,6 +239,7 @@ function regroupAuditItems(result) {
   const items = result.items;
   const groups = {
     already_got_dm: items.filter((i) => i.dm_status === 'already_got_dm' || i.dm_ok),
+    handled_by_owner: items.filter((i) => i.dm_status === 'handled_by_owner' && !i.dm_ok),
     eligible_private_reply: items.filter((i) => i.dm_status === 'eligible_private_reply' && !i.dm_ok),
     not_eligible: items.filter((i) => i.dm_status === 'not_eligible'),
     unknown_dm: items.filter((i) => i.dm_status === 'unknown' && !i.dm_ok),
@@ -249,6 +250,7 @@ function regroupAuditItems(result) {
     ...(result.counts || {}),
     total: items.length,
     already_got_dm: groups.already_got_dm.length,
+    handled_by_owner: groups.handled_by_owner.length,
     eligible_private_reply: groups.eligible_private_reply.length,
     not_eligible: groups.not_eligible.length,
     unknown_dm: groups.unknown_dm.length,
@@ -276,22 +278,32 @@ async function attachRecipientFlags(db, account, result) {
     const publicRow = db.getPublicReply ? await db.getPublicReply(item.comment_id) : null;
     const appPublic = !!(publicRow && publicRow.status === 'sent')
       || !!(existing && existing.public_reply_sent_at && String(existing.comment_id) === String(item.comment_id));
-    const igPublic = !!item.public_reply;
+    const igPublic = !!item.public_reply || item.dm_status === 'handled_by_owner';
     const publicOk = igPublic || appPublic;
     const dmOk = !!(existing && (existing.dm_sent_at || existing.opening_sent_at))
       || item.dm_status === 'already_got_dm';
 
     item.already_recorded = !!existing;
     item.recipient_id = existing?.id || null;
+    item.ig_public_reply = igPublic;
     item.public_reply = publicOk;
     item.public_reply_ok = publicOk;
     item.dm_ok = dmOk;
     item.app_public_reply = appPublic;
-    item.can_send = !!item.within_private_reply_window && !dmOk && item.dm_status !== 'not_eligible';
-    item.can_send_public_reply = !publicOk;
     if (dmOk && item.dm_status !== 'already_got_dm') {
       item.dm_status = 'already_got_dm';
+    } else if (!dmOk && igPublic && !appPublic) {
+      // Poller treats an Instagram reply from Rona with no app-recorded DM as already handled.
+      item.dm_status = 'handled_by_owner';
+    } else if (!dmOk && appPublic && item.dm_status === 'handled_by_owner' && item.within_private_reply_window) {
+      // App posted the public reply and still owes a DM — poller will send it.
+      item.dm_status = 'eligible_private_reply';
     }
+    item.can_send = !!item.within_private_reply_window
+      && !dmOk
+      && item.dm_status !== 'not_eligible'
+      && item.dm_status !== 'handled_by_owner';
+    item.can_send_public_reply = !publicOk;
   }
   return regroupAuditItems(result);
 }

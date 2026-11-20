@@ -5,6 +5,7 @@ const { createAuthRouter, createSessionMiddleware } = require('./routes/auth');
 const { createWebhookRouter } = require('./routes/webhooks');
 const { createApiRouter } = require('./routes/api');
 const { createRedirectRouter } = require('./routes/redirect');
+const { createLegalRouter } = require('./routes/legal');
 
 function createApp({ db, config, instagram, engine }) {
   const app = express();
@@ -36,6 +37,7 @@ function createApp({ db, config, instagram, engine }) {
   app.use('/auth', auth.router);
   app.use('/api', createApiRouter({ db, config, instagram, engine }));
   app.use('/r', createRedirectRouter({ db }));
+  app.use(createLegalRouter({ db, config }));
 
   const publicDir = path.join(__dirname, 'public');
   app.use(express.static(publicDir, { extensions: ['html'] }));

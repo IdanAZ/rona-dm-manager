@@ -213,6 +213,14 @@ CREATE TABLE IF NOT EXISTS known_media (
   PRIMARY KEY (account_id, media_id)
 );
 
+CREATE TABLE IF NOT EXISTS deletion_requests (
+  confirmation_code TEXT PRIMARY KEY,
+  fb_user_id TEXT,
+  status TEXT NOT NULL DEFAULT 'received',
+  created_at TEXT NOT NULL DEFAULT (${now}),
+  completed_at TEXT
+);
+
 CREATE TABLE IF NOT EXISTS pending_connections (
   id TEXT PRIMARY KEY,
   user_id INTEGER,
@@ -414,6 +422,13 @@ CREATE TABLE IF NOT EXISTS public_replies (
   source TEXT,
   sent_at TEXT,
   created_at TEXT NOT NULL DEFAULT (${now})
+);
+CREATE TABLE IF NOT EXISTS deletion_requests (
+  confirmation_code TEXT PRIMARY KEY,
+  fb_user_id TEXT,
+  status TEXT NOT NULL DEFAULT 'received',
+  created_at TEXT NOT NULL DEFAULT (${now}),
+  completed_at TEXT
 )`);
   try {
     await driver.exec(`
@@ -436,6 +451,27 @@ UPDATE recipients
   } catch (err) {
     console.warn('[db] dm_sent_at backfill skipped:', err.message);
   }
+}
+
+function parseOutboundPayload(payload) {
+  if (payload == null) return {};
+  if (typeof payload === 'object') return payload;
+  try { return JSON.parse(String(payload)); } catch { return {}; }
+}
+
+function outboundCommentId(payload) {
+  const p = parseOutboundPayload(payload);
+  return String(
+    p.comment_id
+    || (p.body && p.body.recipient && p.body.recipient.comment_id)
+    || (p.result && p.result.comment_id)
+    || ''
+  ).trim();
+}
+
+function outboundUsernameHint(payload) {
+  const p = parseOutboundPayload(payload);
+  return String(p.username || (p.from && p.from.username) || p.user || p.recipient_username || '').trim();
 }
 
 function buildApi(driver) {
@@ -1027,6 +1063,41 @@ function buildApi(driver) {
       });
     },
 
+    async createDeletionRequest({ confirmationCode, fbUserId, status }) {
+      await run(
+        `INSERT INTO deletion_requests (confirmation_code, fb_user_id, status) VALUES (?, ?, ?)`,
+        [confirmationCode, fbUserId || null, status || 'received']
+      );
+    },
+    async getDeletionRequest(code) {
+      return get('SELECT * FROM deletion_requests WHERE confirmation_code = ?', [code]);
+    },
+    async updateDeletionRequest(code, data = {}) {
+      const sets = [];
+      const vals = [];
+      if (data.status) { sets.push('status = ?'); vals.push(data.status); }
+      if (data.completedAt) { sets.push('completed_at = ?'); vals.push(data.completedAt); }
+      if (!sets.length) return;
+      vals.push(code);
+      await run(`UPDATE deletion_requests SET ${sets.join(', ')} WHERE confirmation_code = ?`, vals);
+    },
+    async deletePlatformDataForFacebookUser(fbUserId) {
+      const accounts = await all('SELECT * FROM accounts WHERE fb_user_id = ?', [String(fbUserId)]);
+      for (const account of accounts) {
+        const id = account.id;
+        await run('DELETE FROM outbound_log WHERE account_id = ?', [id]);
+        await run('DELETE FROM recipients WHERE account_id = ?', [id]);
+        await run('DELETE FROM public_replies WHERE account_id = ?', [id]);
+        await run('DELETE FROM private_replies WHERE account_id = ?', [id]);
+        await run('DELETE FROM processed_comments WHERE account_id = ?', [id]);
+        await run('DELETE FROM automations WHERE account_id = ?', [id]);
+        await run('DELETE FROM known_media WHERE account_id = ?', [id]);
+        await run('UPDATE sessions SET active_account_id = NULL WHERE active_account_id = ?', [id]);
+        await run('DELETE FROM accounts WHERE id = ?', [id]);
+      }
+      return accounts.length;
+    },
+
     async logOutbound({ accountId, automationId, recipientId, type, payload, mock }) {
       const r = await run(
         `INSERT INTO outbound_log (account_id, automation_id, recipient_id, type, payload, mock)
@@ -1043,7 +1114,7 @@ function buildApi(driver) {
       return r.lastId;
     },
     async listOutbound({ accountId, limit = 50 }) {
-      return all(
+      const rows = await all(
         `SELECT o.*, a.name AS automation_name,
                 COALESCE(r.username, '') AS recipient_username
            FROM outbound_log o
@@ -1054,6 +1125,53 @@ function buildApi(driver) {
           LIMIT ?`,
         [accountId, limit]
       );
+      return api.enrichOutboundRows(accountId, rows);
+    },
+    async enrichOutboundRows(accountId, rows) {
+      const list = Array.isArray(rows) ? rows : [];
+      const commentIds = [];
+      for (const row of list) {
+        const fromPayload = outboundCommentId(row.payload);
+        if (fromPayload) commentIds.push(fromPayload);
+      }
+      const uniqueIds = [...new Set(commentIds.filter(Boolean))];
+      const byComment = new Map();
+      for (const commentId of uniqueIds) {
+        const recipient = await get(
+          'SELECT * FROM recipients WHERE account_id = ? AND comment_id = ? ORDER BY id DESC LIMIT 1',
+          [accountId, commentId]
+        );
+        const processed = await get(
+          'SELECT * FROM processed_comments WHERE comment_id = ? LIMIT 1',
+          [commentId]
+        );
+        const publicRow = await get(
+          'SELECT * FROM public_replies WHERE comment_id = ? LIMIT 1',
+          [commentId]
+        );
+        let auto = null;
+        const autoId = recipient?.automation_id || processed?.automation_id || publicRow?.automation_id;
+        if (autoId) auto = await api.getAutomation(autoId);
+        let username = recipient?.username || '';
+        if (!username && publicRow?.recipient_id) {
+          const viaPublic = await get('SELECT * FROM recipients WHERE id = ?', [publicRow.recipient_id]);
+          username = viaPublic?.username || '';
+          if (!auto && viaPublic?.automation_id) auto = await api.getAutomation(viaPublic.automation_id);
+        }
+        byComment.set(String(commentId), { recipient, processed, publicRow, auto, username });
+      }
+      return list.map((row) => {
+        const payloadUser = outboundUsernameHint(row.payload);
+        const commentId = outboundCommentId(row.payload);
+        const extra = commentId ? byComment.get(String(commentId)) : null;
+        return {
+          ...row,
+          automation_name: row.automation_name || extra?.auto?.name || null,
+          automation_id: row.automation_id || extra?.auto?.id || extra?.recipient?.automation_id || extra?.processed?.automation_id || null,
+          recipient_username: row.recipient_username || extra?.username || payloadUser || '',
+          comment_id: commentId || null,
+        };
+      });
     },
     async upsertKnownMedia(accountId, media) {
       await run(
@@ -1136,4 +1254,7 @@ module.exports = {
   rewriteInsertIgnore,
   preparePostgresRun,
   schemaSql,
+  parseOutboundPayload,
+  outboundCommentId,
+  outboundUsernameHint,
 };

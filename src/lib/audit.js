@@ -304,6 +304,9 @@ function classifyComment({ comment, account, conversation, conversationsAvailabl
   }
 
   if (!conversationsAvailable) {
+    if (publicReplies.length > 0) {
+      return { ...base, dm_status: 'handled_by_owner', borderline: false };
+    }
     return {
       ...base,
       dm_status: 'unknown',
@@ -341,6 +344,10 @@ function classifyComment({ comment, account, conversation, conversationsAvailabl
     base.content_related = looksCourseRelated(before.map(messageText).join('\n'));
   }
 
+  if (publicReplies.length > 0) {
+    base.dm_status = 'handled_by_owner';
+    return base;
+  }
   base.dm_status = base.within_private_reply_window ? 'eligible_private_reply' : 'not_eligible';
   return base;
 }
@@ -368,6 +375,7 @@ function buildAudit({ media, comments, conversations, account, keyword, now, con
 
   const groups = {
     already_got_dm: matched.filter((i) => i.dm_status === 'already_got_dm'),
+    handled_by_owner: matched.filter((i) => i.dm_status === 'handled_by_owner'),
     eligible_private_reply: matched.filter((i) => i.dm_status === 'eligible_private_reply'),
     not_eligible: matched.filter((i) => i.dm_status === 'not_eligible'),
     unknown_dm: matched.filter((i) => i.dm_status === 'unknown'),
@@ -391,6 +399,7 @@ function buildAudit({ media, comments, conversations, account, keyword, now, con
     counts: {
       total: matched.length,
       already_got_dm: groups.already_got_dm.length,
+      handled_by_owner: groups.handled_by_owner.length,
       eligible_private_reply: groups.eligible_private_reply.length,
       not_eligible: groups.not_eligible.length,
       unknown_dm: groups.unknown_dm.length,
