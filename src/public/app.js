@@ -15,6 +15,7 @@ const state = {
   auditLoading: false,
   auditError: '',
   auditKeyword: 'הכנה',
+  auditAutomationId: 'all',
   auditAction: {},
 };
 
@@ -276,7 +277,10 @@ function navBtn(id, ic, label) {
     onClick: async () => {
       state.tab = id;
       if (id === 'sim') await loadLogs().catch(() => {});
-      if (id === 'audit' && !state.audit && !state.auditLoading) runAudit().catch(() => {});
+      if (id === 'audit') {
+        loadLogs().catch(() => {});
+        if (!state.audit && !state.auditLoading) runAudit().catch(() => {});
+      }
       render();
     },
   }, icon(ic), label);
@@ -369,8 +373,7 @@ async function runAudit() {
   render();
   try {
     const q = new URLSearchParams({
-      keyword: state.auditKeyword || 'הכנה',
-      caption_prefix: 'הגיבי "הכנה" ואשלח לך את כל הפרטים',
+      automation_id: state.auditAutomationId || 'all',
     });
     state.audit = await api('/api/audit/keyword-comments?' + q.toString());
   } catch (err) {
@@ -421,6 +424,11 @@ function renderAuditItem(item) {
       atUser(item.username || 'unknown'),
       auditPill(item),
     ),
+    item.automation_name || item.media_permalink ? h('div', { class: 'muted' },
+      item.automation_name || '',
+      item.automation_name && item.media_permalink ? ' · ' : '',
+      item.media_permalink ? h('a', { href: item.media_permalink, target: '_blank', rel: 'noopener' }, 'לפוסט') : null,
+    ) : null,
     h('div', { class: 'muted' }, item.comment_text || ''),
     h('div', { class: 'muted' },
       (item.timestamp_jerusalem || '') + (item.age_days != null ? ` · לפני ${item.age_days} ימים` : '')
@@ -457,17 +465,108 @@ function renderAuditGroup(title, items) {
   );
 }
 
+
+function automationSelect() {
+  const sel = h('select', {
+    class: 'audit-select',
+    onChange: (e) => { state.auditAutomationId = e.target.value; },
+  },
+    h('option', { value: 'all', selected: (state.auditAutomationId || 'all') === 'all' }, 'כל האוטומציות'),
+    ...(state.automations || []).map((a) => h('option', {
+      value: String(a.id),
+      selected: String(state.auditAutomationId) === String(a.id),
+    }, a.name || ('אוטומציה ' + a.id))),
+  );
+  sel.value = state.auditAutomationId || 'all';
+  return sel;
+}
+
+function parseLogPayload(log) {
+  if (log && log.payload && typeof log.payload === 'object') return log.payload;
+  try { return JSON.parse((log && log.payload) || '{}'); } catch { return {}; }
+}
+
+function formatLogTime(value) {
+  if (!value) return '';
+  const s = String(value).trim();
+  const hasZone = /Z|[+-]\d{2}:?\d{2}$/.test(s);
+  const d = new Date(hasZone ? s : s.replace(' ', 'T') + 'Z');
+  if (Number.isNaN(d.getTime())) return s;
+  const fmt = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Asia/Jerusalem',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  });
+  return `${fmt.format(d)} Asia/Jerusalem`;
+}
+
+function journalActionLabels(log) {
+  const payload = parseLogPayload(log);
+  const actions = [];
+  const failed = !!(payload.error || payload.ok === false);
+  if (log.type === 'comment_reply') actions.push({ action: 'public_reply', ok: !failed });
+  else if (log.type === 'private_reply' || log.type === 'dm' || log.type === 'dm_template') actions.push({ action: 'dm', ok: !failed });
+  else if (log.type === 'poller_send') {
+    if (payload.public_reply && payload.public_reply !== 'skip') {
+      actions.push({ action: 'public_reply', ok: true });
+    } else if (payload.public_reply === null || payload.public_reply === 'skip') {
+      // omit skipped public unless dm only
+    }
+    if (payload.dm === 'sent') actions.push({ action: 'dm', ok: true });
+    else if (payload.dm && payload.dm !== 'sent' && payload.dm !== 'not_follower') actions.push({ action: 'dm', ok: false });
+    if (!actions.length) actions.push({ action: payload.dm === 'not_follower' ? 'dm' : (log.type || 'send'), ok: !failed });
+  } else {
+    actions.push({ action: log.type || 'send', ok: !failed });
+  }
+  return actions;
+}
+
+function journalUsername(log) {
+  const payload = parseLogPayload(log);
+  return log.recipient_username || payload.username || '';
+}
+
+function renderJournal() {
+  const logs = state.logs || [];
+  const wrap = h('section', { class: 'audit-section card' },
+    h('h3', {}, 'יומן'),
+    h('p', { class: 'muted' }, 'שליחות אחרונות מהאפליקציה: תגובה בפוסט או DM.'),
+  );
+  if (!logs.length) {
+    wrap.append(h('p', { class: 'muted' }, 'אין עדיין רשומות ביומן.'));
+    return wrap;
+  }
+  for (const log of logs) {
+    const username = journalUsername(log);
+    const actions = journalActionLabels(log);
+    wrap.append(h('div', { class: 'journal-item' },
+      h('div', { class: 'journal-time' }, formatLogTime(log.created_at)),
+      h('div', { class: 'journal-main' },
+        h('b', {}, log.automation_name || (log.automation_id ? ('אוטומציה ' + log.automation_id) : '—')),
+        username ? h('span', {}, ' · ', atUser(username)) : null,
+      ),
+      h('div', { class: 'journal-actions' },
+        ...actions.map((a) => h('span', { class: 'journal-flag' + (a.ok ? ' is-ok' : ' is-error') },
+          (a.action === 'public_reply' ? 'תגובה בפוסט' : a.action === 'dm' ? 'DM' : a.action) + ' · ' + (a.ok ? 'ok' : 'error')
+        )),
+      ),
+    ));
+  }
+  return wrap;
+}
+
 function renderAuditPage() {
   const wrap = h('div', {});
   wrap.append(
     h('div', { class: 'page-head' }, h('h2', {}, 'מי כבר קיבל הודעה')),
-    h('p', { class: 'audit-note' }, 'כאן רואים מי הגיבה עם מילת המפתח, והאם כבר נשלחה תגובה בפוסט ו־DM. למי שחסר אפשר להשלים ידנית, אחרי אישור. מי שכבר קיבלה הודעה יורדת מרשימת הממתינות.'),
+    h('p', { class: 'audit-note' }, 'בחרו אוטומציה, או את כל האוטומציות, כדי לראות מי הגיבה עם מילת המפתח והאם כבר נשלחה תגובה בפוסט ו־DM. למי שחסר אפשר להשלים ידנית, אחרי אישור. מי שכבר קיבלה הודעה יורדת מרשימת הממתינות.'),
     h('div', { class: 'audit-controls' },
-      h('input', {
-        value: state.auditKeyword,
-        onInput: (e) => { state.auditKeyword = e.target.value; },
-        placeholder: 'מילת מפתח, למשל הכנה',
-      }),
+      automationSelect(),
       h('button', {
         class: 'btn btn-sm',
         disabled: state.auditLoading,
@@ -478,8 +577,13 @@ function renderAuditPage() {
   if (state.auditError) wrap.append(h('div', { class: 'err-list' }, state.auditError));
   if (state.auditLoading && !state.audit) wrap.append(h('p', { class: 'muted' }, 'סורק תגובות ושיחות… זה עלול לקחת יותר מדקה.'));
   const a = state.audit;
-  if (!a) return wrap;
-  if (a.media) {
+  if (!a) {
+    wrap.append(renderJournal());
+    return wrap;
+  }
+  if (a.automations && a.automations.length > 1) {
+    wrap.append(h('p', { class: 'muted' }, `נבדקו ${a.automations.length} אוטומציות`));
+  } else if (a.media) {
     wrap.append(h('p', { class: 'muted' }, a.media.permalink
       ? h('a', { href: a.media.permalink, target: '_blank', rel: 'noopener' }, a.media.caption || 'הפוסט שנבדק')
       : (a.media.caption || 'הפוסט שנבדק')));
@@ -507,6 +611,7 @@ function renderAuditPage() {
   ]) {
     if (section) wrap.append(section);
   }
+  wrap.append(renderJournal());
   return wrap;
 }
 

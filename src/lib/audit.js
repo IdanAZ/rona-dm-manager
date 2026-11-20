@@ -345,13 +345,15 @@ function classifyComment({ comment, account, conversation, conversationsAvailabl
   return base;
 }
 
-function buildAudit({ media, comments, conversations, account, keyword, now, conversationsAvailable = true }) {
+function buildAudit({ media, comments, conversations, account, keyword, now, conversationsAvailable = true, matchComment } = {}) {
   const kw = keyword || DEFAULT_KEYWORD;
   const when = parseTime(now) || new Date();
   const index = indexConversations(conversations);
   const matched = [];
   for (const comment of comments || []) {
-    if (!matchesAuditKeyword(comment.text, kw)) continue;
+    const text = comment.text || '';
+    const matchedText = typeof matchComment === 'function' ? matchComment(text) : matchesAuditKeyword(text, kw);
+    if (!matchedText) continue;
     const author = commentAuthor(comment);
     const item = classifyComment({
       comment,
