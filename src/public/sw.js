@@ -1,5 +1,5 @@
-const CACHE = 'rona-insta-v7';
-const SHELL = ['/', '/index.html', '/styles.css?v=7', '/styles-plus.css?v=7', '/app.js?v=7', '/manifest.json', '/icons/icon-192.png', '/icons/icon-512.png'];
+const CACHE = 'rona-insta-v8';
+const SHELL = ['/', '/index.html', '/styles.css?v=8', '/styles-plus.css?v=8', '/app.js?v=8', '/manifest.json', '/icons/icon-192.png', '/icons/icon-512.png'];
 
 self.addEventListener('install', (event) => {
   event.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));

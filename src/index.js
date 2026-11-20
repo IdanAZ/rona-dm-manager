@@ -5,6 +5,7 @@ const { createEngine } = require('./services/engine');
 const { createApp } = require('./app');
 const { startCommentPoller } = require('./services/commentPoller');
 const { startWeeklySummaryJob } = require('./services/weeklySummary');
+const { seedPartnersForExistingAccounts } = require('./services/seed');
 
 async function main() {
   const db = await createDb(process.env.DATABASE_URL || config.dbPath);
@@ -43,6 +44,13 @@ async function main() {
 
   const commentPoller = startCommentPoller({ db, instagram, engine, config });
   const weeklyJob = startWeeklySummaryJob({ db, instagram, config });
+
+  seedPartnersForExistingAccounts(db)
+    .then((results) => {
+      const n = (results || []).filter((r) => r.seeded).length;
+      if (n) console.log(`[partners] seeded curated list for ${n} account(s)`);
+    })
+    .catch((err) => console.warn('[partners] seed', err.message));
 
   function shutdown() {
     clearInterval(refreshTimer);

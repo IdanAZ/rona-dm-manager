@@ -7,6 +7,7 @@ const {
   buildWeeklySummary,
 } = require('../lib/insights');
 const { buildFunnels, recipientToLeadDraft, parseLeadFields } = require('../lib/leads');
+const { collectAutomationAudit, attachRecipientFlags } = require('./commentAudit');
 
 const FALLBACK_NOTE = 'הסטטיסטיקות המלאות (חשיפה, צפיות וצמיחת עוקבות) יופיעו כאן אחרי אישור Meta להרשאת התובנות. בינתיים מוצג מה שאפשר לחשב מהפוסטים עצמם — לייקים, תגובות וזמני פרסום.';
 
@@ -64,35 +65,69 @@ async function syncLeadsFromRecipients(db, accountId, automations) {
   return db.listLeads(accountId);
 }
 
+async function collectAutomationAudits({ db, instagram, account, automations, now, errors }) {
+  const audits = {};
+  await Promise.all((automations || []).map(async (auto) => {
+    if (!auto || !auto.media_id) return;
+    try {
+      const raw = await collectAutomationAudit(instagram, account, auto, {
+        now,
+        includeConversations: false,
+      });
+      if (!raw || !raw.ok) {
+        if (raw && (raw.message || raw.error)) {
+          errors.push({ label: 'audit.' + auto.id, message: raw.message || raw.error, code: raw.error || null });
+        }
+        return;
+      }
+      const tagged = db ? await attachRecipientFlags(db, account, raw) : raw;
+      audits[auto.id] = tagged;
+      audits[String(auto.id)] = tagged;
+    } catch (err) {
+      errors.push({ label: 'audit.' + auto.id, message: err.message });
+    }
+  }));
+  return audits;
+}
+
 async function collectInsights({ db, instagram, account, days = 30, now = new Date() } = {}) {
   const window = periodWindow(days, now);
   const errors = [];
-  const media = (await safeCall(() => instagram.listMedia(account), 'listMedia', errors)) || [];
 
-  let insightsCurrent = null;
-  let insightsPrevious = null;
-  let profile = null;
-  if (instagram.getAccountInsights) {
-    insightsCurrent = await safeCall(
+  const mediaPromise = safeCall(() => instagram.listMedia(account), 'listMedia', errors);
+  const insightsCurrentPromise = instagram.getAccountInsights
+    ? safeCall(
       () => instagram.getAccountInsights(account, {
         since: unixSeconds(window.since),
         until: unixSeconds(window.until),
       }),
       'accountInsights.current',
       errors
-    );
-    insightsPrevious = await safeCall(
+    )
+    : Promise.resolve(null);
+  const insightsPreviousPromise = instagram.getAccountInsights
+    ? safeCall(
       () => instagram.getAccountInsights(account, {
         since: unixSeconds(window.prevSince),
         until: unixSeconds(window.prevUntil),
       }),
       'accountInsights.previous',
       errors
-    );
-  }
-  if (instagram.getAccountProfile) {
-    profile = await safeCall(() => instagram.getAccountProfile(account), 'accountProfile', errors);
-  }
+    )
+    : Promise.resolve(null);
+  const profilePromise = instagram.getAccountProfile
+    ? safeCall(() => instagram.getAccountProfile(account), 'accountProfile', errors)
+    : Promise.resolve(null);
+  const automationsPromise = db.listAutomations(account.id);
+
+  const [mediaResult, insightsCurrent, insightsPrevious, profile, automations] = await Promise.all([
+    mediaPromise,
+    insightsCurrentPromise,
+    insightsPreviousPromise,
+    profilePromise,
+    automationsPromise,
+  ]);
+  const media = mediaResult || [];
 
   let trends = computeMediaTrends(media, days, now);
   if (insightsCurrent) {
@@ -137,21 +172,24 @@ async function collectInsights({ db, instagram, account, days = 30, now = new Da
 
   const works = whatWorks(media, days, now);
 
-  const automations = (await db.listAutomations(account.id)) || [];
   const leads = await syncLeadsFromRecipients(db, account.id, automations);
   let recipients = [];
   if (typeof db.listRecipientsByAccount === 'function') {
     recipients = await db.listRecipientsByAccount(account.id);
   } else {
-    for (const auto of automations) {
+    for (const auto of automations || []) {
       recipients.push(...(await db.listRecipients(auto.id)));
     }
   }
-  const funnels = buildFunnels(automations, { recipients, leads });
-  const comments = recipients.map((r) => ({
-    text: r.comment_text,
-    comment_text: r.comment_text,
-  }));
+  const audits = await collectAutomationAudits({ db, instagram, account, automations, now, errors });
+  const funnels = buildFunnels(automations, { recipients, leads, audits });
+  const comments = [];
+  for (const r of recipients) comments.push({ text: r.comment_text, comment_text: r.comment_text });
+  for (const audit of Object.values(audits)) {
+    for (const item of audit.items || []) {
+      if (item.comment_text) comments.push({ text: item.comment_text, comment_text: item.comment_text });
+    }
+  }
   const recommendations = generateRecommendations({
     media,
     automations,

@@ -51,6 +51,7 @@ async function serializeAutomation(db, auto) {
     next_pending: !!auto.next_pending,
     public_reply_variants: variants,
     metrics,
+    has_tracked_link: !!(auto.second_dm_link_url && String(auto.second_dm_link_url).trim()),
   };
 }
 
@@ -338,13 +339,23 @@ function createApiRouter({ db, config, instagram, engine }) {
   });
 
   const { collectInsights } = require('../services/insights');
+  const { getCachedInsights } = require('../services/insightsCache');
+  const { seedPartnersIfEmpty } = require('../services/seed');
   const { runWeeklySummaries } = require('../services/weeklySummary');
   const { normalizeLeadStatus, normalizeLeadSource, parseLeadFields } = require('../lib/leads');
 
   router.get('/insights', requireAccount, async (req, res, next) => {
     try {
       const days = Number(req.query.days) === 7 ? 7 : 30;
-      const data = await collectInsights({ db, instagram, account: req.account, days });
+      const wait = req.query.wait !== '0';
+      const force = req.query.refresh === '1' || req.query.force === '1';
+      const data = await getCachedInsights({
+        account: req.account,
+        days,
+        wait,
+        force,
+        collect: () => collectInsights({ db, instagram, account: req.account, days }),
+      });
       res.json(data);
     } catch (err) { next(err); }
   });
@@ -412,6 +423,7 @@ function createApiRouter({ db, config, instagram, engine }) {
 
   router.get('/partners', requireAccount, async (req, res, next) => {
     try {
+      await seedPartnersIfEmpty(db, req.account.id);
       res.json({ partners: await db.listPartners(req.account.id) });
     } catch (err) { next(err); }
   });
