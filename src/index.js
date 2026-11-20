@@ -4,6 +4,7 @@ const { createInstagramClient, refreshDueTokens } = require('./services/instagra
 const { createEngine } = require('./services/engine');
 const { createApp } = require('./app');
 const { startCommentPoller } = require('./services/commentPoller');
+const { startWeeklySummaryJob } = require('./services/weeklySummary');
 
 async function main() {
   const db = await createDb(process.env.DATABASE_URL || config.dbPath);
@@ -41,12 +42,14 @@ async function main() {
   }, config.pollIntervalMs);
 
   const commentPoller = startCommentPoller({ db, instagram, engine, config });
+  const weeklyJob = startWeeklySummaryJob({ db, instagram, config });
 
   function shutdown() {
     clearInterval(refreshTimer);
     clearInterval(followupTimer);
     clearInterval(pollTimer);
     if (commentPoller && commentPoller.stop) commentPoller.stop();
+    if (weeklyJob && weeklyJob.stop) weeklyJob.stop();
     server.close(async () => {
       try { await db.close(); } catch {}
       process.exit(0);

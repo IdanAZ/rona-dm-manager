@@ -93,7 +93,7 @@ SESSION_SECRET=מחרוזת-ארוכה-ואקראית
 1. **Create new configuration** (או בחרו תצורה קיימת עם התווית Instagram Login Compatible).
 2. תחת Edit permissions / assets, כללו לפחות:
    - נכסים: חשבון אינסטגרם, ועמוד פייסבוק (Pages) אם מוצע
-   - הרשאות: `instagram_basic`, `instagram_manage_comments`, `instagram_manage_messages`
+   - הרשאות: `instagram_basic`, `instagram_manage_comments`, `instagram_manage_messages`, `instagram_manage_insights`
    - וגם לפי הצורך: `pages_show_list`, `pages_manage_metadata`, `pages_read_engagement`, `pages_messaging`, `business_management`
 3. **Use this configuration**.
 4. תחת **Redirect URL** הזינו בדיוק (HTTPS, בלי סלאש בסוף הדומיין):
@@ -228,7 +228,10 @@ ngrok (`ngrok http 3000`) עובד באותו אופן.
 | `WEBHOOK_VERIFY_TOKEN` | אותו ערך כמו ב-Meta |
 | `GRAPH_API_VERSION` | ברירת מחדל `v23.0` |
 | `FOLLOW_CHECK_MODE` | `stub` או `api` |
-| `FACEBOOK_SCOPES` | גיבוי אם אין `config_id` (ההרשאות האמיתיות מגיעות מהתצורה) |
+| `FACEBOOK_SCOPES` | גיבוי אם אין `config_id` (ההרשאות האמיתיות מגיעות מהתצורה). בברירת המחדל כלול גם `instagram_manage_insights` |
+| `SUMMARY_EMAIL_TO` | אם מוגדר יחד עם `RESEND_API_KEY` או `SMTP_HOST`, יישלח הסיכום השבועי באימייל. כבוי כשהמשתנים חסרים |
+| `LLM_PROVIDER` / `XAI_API_KEY` / `OPENAI_API_KEY` / `LLM_MODEL` | מפעילים את העוזרת החכמה (chat-completions + tool calling). בלי מפתח מוצג מצב «תופעל בקרוב» עם fallback לכללים |
+| `FEATURE_REQUEST_WEBHOOK_URL` / `FEATURE_REQUEST_EMAIL` | העברת בקשות שיפור. כבוי אם לא הוגדר |
 | `INSTAGRAM_SCOPES` | ל-`AUTH_MODE=instagram` בלבד |
 | `POLL_INTERVAL_MS` | מרווח הבודק בשרת לתגובות (ברירת מחדל `60000`) |
 | `MEDIA_POLL_INTERVAL_MS` | סריקת פוסטים חדשים לאוטומציית «הפוסט הבא» (ברירת מחדל `120000`) |
