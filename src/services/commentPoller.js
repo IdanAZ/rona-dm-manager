@@ -97,15 +97,69 @@ async function classifyNeed({ db, account, automation, comment, now }) {
   return { action: 'skip', reason: 'no_need', recipient, hasPublic, hasDm };
 }
 
+function summarizePollerResults(results) {
+  const list = Array.isArray(results) ? results : [];
+  const stats = (results && results.stats) || {};
+  const sends = list.filter((r) => r.ok && !r.skipped && !r.error);
+  const errorItems = list.filter((r) => r.ok === false || r.error);
+  const skipped = list.filter((r) => r.skipped || r.reason === 'poller_disabled');
+  return {
+    accounts: stats.accounts ?? null,
+    enabled: stats.enabled ?? null,
+    automations: stats.automations ?? null,
+    comments: stats.comments ?? null,
+    sent: sends.length,
+    skipped: skipped.length,
+    errors: errorItems.length,
+    sends,
+    errorItems,
+  };
+}
+
+function formatPollerCycleLog(summary) {
+  return `[comment-poller] cycle accounts=${summary.accounts ?? '?'} enabled=${summary.enabled ?? '?'} automations=${summary.automations ?? '?'} comments=${summary.comments ?? '?'} sent=${summary.sent} skipped=${summary.skipped} errors=${summary.errors}`;
+}
+
+function formatPollerSendLog(result) {
+  const auto = result.automationName || result.automationId || '';
+  const user = result.username ? `@${result.username}` : (result.commentId || '');
+  const action = result.need || result.action || '';
+  const publicStatus = result.reason === 'public_reply_failed'
+    ? 'error'
+    : (result.publicReply ? 'ok' : 'skip');
+  const dmStatus = result.reason === 'dm_failed'
+    ? 'error'
+    : (result.opening ? 'ok' : 'skip');
+  return `[comment-poller] send automation=${auto} user=${user} action=${action} public=${publicStatus} dm=${dmStatus}`;
+}
+
+function formatPollerErrorLog(result) {
+  const auto = result.automationName || result.automationId || '';
+  const user = result.username ? `@${result.username}` : (result.commentId || '');
+  return `[comment-poller] error automation=${auto} user=${user} ${result.error || ''}`.trim();
+}
+
+function logPollerCycle(results) {
+  const summary = summarizePollerResults(results);
+  console.log(formatPollerCycleLog(summary));
+  for (const send of summary.sends) console.log(formatPollerSendLog(send));
+  for (const err of summary.errorItems) console.warn(formatPollerErrorLog(err));
+  return summary;
+}
+
 async function pollComments({ db, instagram, engine, config, now } = {}) {
   const when = now || new Date();
   const results = [];
+  const stats = { accounts: 0, enabled: 0, automations: 0, comments: 0 };
+  results.stats = stats;
   const accounts = await db.listAccountsWithTokens();
+  stats.accounts = accounts.length;
   for (const account of accounts) {
     if (!isPollerEnabled(account)) {
       results.push({ accountId: account.id, skipped: true, reason: 'poller_disabled' });
       continue;
     }
+    stats.enabled += 1;
     let automations = [];
     try {
       automations = await db.listLiveSpecificAutomations(account.id);
@@ -113,6 +167,7 @@ async function pollComments({ db, instagram, engine, config, now } = {}) {
       results.push({ accountId: account.id, ok: false, error: err.message });
       continue;
     }
+    stats.automations += automations.length;
     for (const automation of automations) {
       let comments = [];
       try {
@@ -126,7 +181,9 @@ async function pollComments({ db, instagram, engine, config, now } = {}) {
         });
         continue;
       }
+      stats.comments += comments.length;
       for (const comment of comments) {
+        const username = commentAuthor(comment).username || comment.username || '';
         let need;
         try {
           need = await classifyNeed({ db, account, automation, comment, now: when });
@@ -134,7 +191,9 @@ async function pollComments({ db, instagram, engine, config, now } = {}) {
           results.push({
             accountId: account.id,
             automationId: automation.id,
+            automationName: automation.name,
             commentId: comment.id,
+            username,
             ok: false,
             error: err.message,
           });
@@ -158,15 +217,20 @@ async function pollComments({ db, instagram, engine, config, now } = {}) {
           results.push({
             accountId: account.id,
             automationId: automation.id,
+            automationName: automation.name,
             commentId: comment.id,
+            username,
             need: need.reason,
+            action: need.action,
             ...handled,
           });
         } catch (err) {
           results.push({
             accountId: account.id,
             automationId: automation.id,
+            automationName: automation.name,
             commentId: comment.id,
+            username,
             ok: false,
             error: err.message,
           });
@@ -180,13 +244,15 @@ async function pollComments({ db, instagram, engine, config, now } = {}) {
 function startCommentPoller({ db, instagram, engine, config }) {
   const interval = Math.max(5000, Number(config.commentPollIntervalMs || 60000) || 60000);
   let running = false;
+  console.log(`[comment-poller] started interval=${interval}ms`);
   const tick = async () => {
     if (running) return;
     running = true;
     try {
-      await pollComments({ db, instagram, engine, config });
+      const results = await pollComments({ db, instagram, engine, config });
+      logPollerCycle(results);
     } catch (err) {
-      console.warn('[comment-poller]', err.message);
+      console.warn('[comment-poller] cycle failed', err.message);
     } finally {
       running = false;
     }
@@ -212,4 +278,8 @@ module.exports = {
   classifyNeed,
   isPollerEnabled,
   uniqueComments,
+  summarizePollerResults,
+  formatPollerCycleLog,
+  formatPollerSendLog,
+  logPollerCycle,
 };

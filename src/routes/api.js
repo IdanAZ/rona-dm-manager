@@ -3,7 +3,7 @@ const { requireAuth, requireAccount, publicAccount } = require('./auth');
 const { processPayload, mockCommentPayload, mockPostbackPayload, mockMessagePayload } = require('./webhooks');
 const { randomId } = require('../lib/signatures');
 const { nowSql } = require('../db');
-const { collectKeywordCommentAudit, attachRecipientFlags, sendManualOpeningDm, sendMissingPublicReply } = require('../services/commentAudit');
+const { collectCommentAudit, attachRecipientFlags, sendManualOpeningDm, sendMissingPublicReply } = require('../services/commentAudit');
 
 function asBool(v, fallback = false) {
   if (v === undefined || v === null || v === '') return fallback;
@@ -93,11 +93,12 @@ function createApiRouter({ db, config, instagram, engine }) {
 
   router.get('/audit/keyword-comments', requireAccount, async (req, res) => {
     try {
-      const result = await collectKeywordCommentAudit(instagram, req.account, {
+      const result = await collectCommentAudit(instagram, req.account, {
         keyword: req.query.keyword,
         captionPrefix: req.query.caption_prefix,
         mediaId: req.query.media_id,
-      });
+        automationId: req.query.automation_id,
+      }, db);
       if (result.ok) await attachRecipientFlags(db, req.account, result);
       const status = result.ok ? 200 : (result.error === 'media_not_found' ? 404 : 502);
       res.status(status).json(result);

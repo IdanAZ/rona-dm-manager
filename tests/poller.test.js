@@ -410,3 +410,33 @@ describe('comment poller and shared dedupe', () => {
     }
   });
 });
+
+test('poller cycle summary and send log lines are concise', async () => {
+  const { pollComments, summarizePollerResults, formatPollerCycleLog, formatPollerSendLog } = require('../src/services/commentPoller');
+  const { db, instagram, engine, config, account, auto } = await setup();
+  const results = await pollComments({ db, instagram, engine, config, now: NOW });
+  assert.equal(results.stats.accounts, 1);
+  assert.equal(results.stats.enabled, 1);
+  assert.ok(results.stats.automations >= 1);
+  assert.ok(results.stats.comments >= 1);
+  const summary = summarizePollerResults(results);
+  assert.ok(summary.sent >= 1);
+  const cycle = formatPollerCycleLog(summary);
+  assert.match(cycle, /^\[comment-poller\] cycle /);
+  assert.match(cycle, /accounts=1/);
+  assert.match(cycle, /sent=/);
+  const tamar = results.find((r) => r.commentId === 'mock_c_tamar');
+  const line = formatPollerSendLog(tamar);
+  assert.match(line, /^\[comment-poller\] send /);
+  assert.match(line, /automation=הכנה/);
+  assert.match(line, /user=@tamar_eligible/);
+  assert.match(line, /public=ok/);
+  assert.match(line, /dm=ok/);
+
+  const logs = await db.listOutbound({ accountId: account.id, limit: 30 });
+  const pollerLog = logs.find((l) => l.type === 'poller_send');
+  assert.ok(pollerLog);
+  assert.equal(pollerLog.automation_name, 'הכנה');
+  assert.equal(pollerLog.recipient_username, 'tamar_eligible');
+  await db.close();
+});
