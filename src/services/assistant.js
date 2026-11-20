@@ -358,9 +358,13 @@ function assistantStatus(config) {
     provider: llm.enabled ? llm.provider : null,
     model: llm.enabled ? llm.model : null,
     fallback: !llm.enabled,
+    banner: llm.enabled
+      ? 'אפשר לדבר איתי חופשי. פעולות יופיעו לאישור לפני שינוי.'
+      : 'העוזרת החכמה תופעל במלואה בקרוב. בינתיים פעולות פשוטות כבר עובדות.',
+    // Keep a string `message` for the banner only — never a chat row object.
     message: llm.enabled
       ? 'אפשר לדבר איתי חופשי. פעולות יופיעו לאישור לפני שינוי.'
-      : 'העוזרת החכמה תופעל בקרוב. בינתיים אפשר לבקש פעולות פשוטות בעברית, ואציע אותן לאישור לפני כל שינוי.',
+      : 'העוזרת החכמה תופעל במלואה בקרוב. בינתיים פעולות פשוטות כבר עובדות.',
   };
 }
 

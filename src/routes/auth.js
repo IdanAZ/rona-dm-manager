@@ -332,6 +332,7 @@ function createAuthRouter({ db, config, instagram }) {
       account: publicAccount(req.account),
       accounts,
       mockMode: config.mockMode,
+      showSimulation: !!config.showSimulation,
       authMode: config.authMode,
     });
     } catch (err) { next(err); }
