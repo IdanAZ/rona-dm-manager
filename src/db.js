@@ -1,7 +1,5 @@
 const fs = require('fs');
 const path = require('path');
-const { DatabaseSync } = require('node:sqlite');
-
 const ACCOUNT_EXTRA_COLUMNS = {
   page_id: 'TEXT',
   page_name: 'TEXT',
@@ -355,6 +353,10 @@ function parseTs(value) {
 }
 
 function createSqliteDriver(dbPath) {
+  // Lazy-load: requiring node:sqlite at module load emits an ExperimentalWarning
+  // on Node versions where the built-in SQLite binding is still experimental
+  // (typical on Render even when the app uses Postgres).
+  const { DatabaseSync } = require('node:sqlite');
   if (dbPath && dbPath !== ':memory:') {
     fs.mkdirSync(path.dirname(path.resolve(dbPath)), { recursive: true });
   }
@@ -763,6 +765,9 @@ function buildApi(driver) {
     async deleteAccount(accountId) {
       await run('UPDATE sessions SET active_account_id = NULL WHERE active_account_id = ?', [accountId]);
       await run('DELETE FROM accounts WHERE id = ?', [accountId]);
+    },
+    async listAccounts() {
+      return all('SELECT * FROM accounts ORDER BY id');
     },
     async listAccountsWithTokens() {
       return all("SELECT * FROM accounts WHERE access_token IS NOT NULL AND access_token != ''");

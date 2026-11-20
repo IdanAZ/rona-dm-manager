@@ -12,7 +12,12 @@ const {
   mergeAccountInsights,
   engagementOf,
 } = require('../src/lib/insights');
-const { buildFunnels, recipientToLeadDraft, statusFromRecipient } = require('../src/lib/leads');
+const { buildFunnels, funnelFromAudit, recipientToLeadDraft, statusFromRecipient } = require('../src/lib/leads');
+const { buildAudit } = require('../src/lib/audit');
+const { attachRecipientFlags } = require('../src/services/commentAudit');
+const { collectInsights } = require('../src/services/insights');
+const { seedPartnersIfEmpty } = require('../src/services/seed');
+const { getCachedInsights, clearInsightsCache } = require('../src/services/insightsCache');
 const { weekStartSundayJerusalem, jerusalemParts, isSundayNineJerusalem } = require('../src/lib/time');
 const { emailConfigured, sendEmail } = require('../src/lib/email');
 const { createDb } = require('../src/db');
@@ -207,9 +212,11 @@ async function withApp(fn) {
   server.listen(0, '127.0.0.1');
   await once(server, 'listening');
   const { port } = server.address();
+  clearInsightsCache();
   try {
     await fn({ db, config, instagram, port });
   } finally {
+    clearInsightsCache();
     server.close();
     await db.close();
   }
@@ -333,4 +340,338 @@ test('default Facebook scopes include instagram_manage_insights', () => {
   assert.ok(config.meta.scopes.includes('instagram_manage_insights'));
   Object.assign(process.env, orig);
   delete require.cache[require.resolve('../src/config')];
+});
+
+
+function kwComment({ id, username, text, ownerReply, at }) {
+  const comment = {
+    id,
+    text,
+    username,
+    timestamp: at || '2026-11-18T10:00:00+0000',
+    from: { id: 'id_' + username, username },
+    parent_id: null,
+    replies: [],
+  };
+  if (ownerReply) {
+    comment.replies.push({
+      id: 'r_' + id,
+      text: ownerReply,
+      username: 'ronaazarya_midwife',
+      timestamp: '2026-11-18T11:00:00+0000',
+      from: { id: 'ig_rona', username: 'ronaazarya_midwife' },
+      parent_id: id,
+    });
+  }
+  return comment;
+}
+
+test('funnel per automation matches audit: keyword comments, sent DMs, handled by owner', async () => {
+  const account = { id: 1, username: 'ronaazarya_midwife', ig_user_id: 'ig_rona' };
+  const hakana = { id: 11, name: 'הכנה', keywords: 'הכנה', keyword_mode: 'keywords', media_id: 'media_hakana' };
+  const cake = { id: 22, name: 'עוגה', keywords: 'עוגה', keyword_mode: 'keywords', media_id: 'media_cake' };
+
+  const hakanaComments = [
+    kwComment({ id: 'c1', username: 'idan_azarya_', text: 'הכנה', ownerReply: null }),
+    kwComment({ id: 'c2', username: 'esther16930', text: 'הכנה בבקשה', ownerReply: null }),
+    kwComment({ id: 'c3', username: 'maya1', text: 'הכנה', ownerReply: 'שלחתי לך בפרטי בעבר 💗' }),
+    kwComment({ id: 'c4', username: 'maya2', text: 'הכנה', ownerReply: 'היי, כבר כתבתי לך 💗' }),
+    kwComment({ id: 'c5', username: 'maya3', text: 'הכנה!', ownerReply: 'מחכה לך בקורס 💗' }),
+    kwComment({ id: 'c6', username: 'maya4', text: 'הכנה', ownerReply: 'כתבתי בפרטי 💗' }),
+    kwComment({ id: 'c7', username: 'maya5', text: 'הכנה', ownerReply: 'מענה ידני 💗' }),
+    kwComment({ id: 'c8', username: 'other', text: 'שאלה כללית', ownerReply: null }),
+  ];
+  const cakeComments = [
+    kwComment({ id: 'k1', username: 'dana_cake', text: 'עוגה', ownerReply: null }),
+    kwComment({ id: 'k2', username: 'lina_cake', text: 'עוגה בבקשה', ownerReply: null }),
+  ];
+
+  const hakanaAudit = buildAudit({
+    media: { id: 'media_hakana', caption: 'הגיבי הכנה' },
+    comments: hakanaComments,
+    conversations: [],
+    account,
+    keyword: 'הכנה',
+    now: NOW,
+    conversationsAvailable: false,
+  });
+  const cakeAudit = buildAudit({
+    media: { id: 'media_cake', caption: 'עוגה' },
+    comments: cakeComments,
+    conversations: [],
+    account,
+    keyword: 'עוגה',
+    now: NOW,
+    conversationsAvailable: false,
+  });
+  assert.equal(hakanaAudit.counts.total, 7);
+  assert.equal(hakanaAudit.counts.handled_by_owner, 5);
+
+  const db = {
+    async findRecipientByCommentOrUser({ commentId }) {
+      const map = {
+        c1: { id: 101, comment_id: 'c1', opening_sent_at: '2026-11-18 12:00:00', dm_sent_at: '2026-11-18 12:00:00', automation_id: 11 },
+        c2: { id: 102, comment_id: 'c2', opening_sent_at: '2026-11-18 12:05:00', dm_sent_at: '2026-11-18 12:05:00', automation_id: 11 },
+        k1: { id: 201, comment_id: 'k1', opening_sent_at: '2026-11-18 13:00:00', dm_sent_at: '2026-11-18 13:00:00', automation_id: 22 },
+        k2: { id: 202, comment_id: 'k2', opening_sent_at: '2026-11-18 13:05:00', dm_sent_at: '2026-11-18 13:05:00', automation_id: 22 },
+      };
+      return map[commentId] || null;
+    },
+    async getPublicReply() { return null; },
+  };
+
+  const hakanaTagged = await attachRecipientFlags(db, account, { ok: true, items: hakanaAudit.items, counts: hakanaAudit.counts });
+  const cakeTagged = await attachRecipientFlags(db, account, { ok: true, items: cakeAudit.items, counts: cakeAudit.counts });
+
+  const recipients = [
+    { automation_id: 11, comment_id: 'c1', opening_sent_at: '2026-11-18 12:00:00', dm_sent_at: '2026-11-18 12:00:00', created_at: '2026-11-18 12:00:00' },
+    { automation_id: 11, comment_id: 'c2', opening_sent_at: '2026-11-18 12:05:00', dm_sent_at: '2026-11-18 12:05:00', created_at: '2026-11-18 12:05:00' },
+    { automation_id: 22, comment_id: 'k1', opening_sent_at: '2026-11-18 13:00:00', dm_sent_at: '2026-11-18 13:00:00', created_at: '2026-11-18 13:00:00' },
+    { automation_id: 22, comment_id: 'k2', opening_sent_at: '2026-11-18 13:05:00', dm_sent_at: '2026-11-18 13:05:00', created_at: '2026-11-18 13:05:00' },
+  ];
+
+  // Recipients-only (the production bug) would show 2/2/0 for הכנה.
+  const naive = buildFunnels([hakana, cake], { recipients, leads: [] });
+  assert.equal(naive.find((f) => f.automation_id === 11).comments_matched, 2);
+  assert.equal(naive.find((f) => f.automation_id === 11).handled_by_owner, 0);
+
+  const funnels = buildFunnels([hakana, cake], {
+    recipients,
+    leads: [],
+    audits: { 11: hakanaTagged, 22: cakeTagged },
+  });
+  const h = funnels.find((f) => f.automation_id === 11);
+  const c = funnels.find((f) => f.automation_id === 22);
+  assert.equal(h.comments_matched, 7);
+  assert.equal(h.sent, 2);
+  assert.equal(h.handled_by_owner, 5);
+  assert.equal(h.source, 'audit');
+  assert.equal(c.comments_matched, 2);
+  assert.equal(c.sent, 2);
+  assert.equal(c.handled_by_owner, 0);
+  assert.notEqual(h.comments_matched, c.comments_matched);
+  const overlay = funnelFromAudit(hakana, hakanaTagged, { recipients, leads: [] });
+  assert.equal(overlay.comments_matched, 7);
+});
+
+test('collectInsights builds distinct per-automation funnels from audit data', async () => {
+  const db = await createDb(':memory:');
+  const userId = await db.createUser();
+  const account = await db.upsertAccount({
+    userId,
+    igUserId: 'ig_rona',
+    username: 'ronaazarya_midwife',
+    name: 'רונה',
+    accessToken: 'tok',
+  });
+  const hakana = await db.createAutomation({
+    account_id: account.id,
+    name: 'הכנה',
+    keywords: 'הכנה',
+    keyword_mode: 'keywords',
+    media_id: 'media_hakana',
+    status: 'live',
+  });
+  const cake = await db.createAutomation({
+    account_id: account.id,
+    name: 'עוגה',
+    keywords: 'עוגה',
+    keyword_mode: 'keywords',
+    media_id: 'media_cake',
+    status: 'live',
+  });
+  await db.createRecipient({
+    account_id: account.id, automation_id: hakana.id, comment_id: 'c1', username: 'idan_azarya_',
+    opening_sent_at: '2026-11-18 12:00:00', dm_sent_at: '2026-11-18 12:00:00', status: 'opening_sent',
+  });
+  await db.createRecipient({
+    account_id: account.id, automation_id: hakana.id, comment_id: 'c2', username: 'esther16930',
+    opening_sent_at: '2026-11-18 12:05:00', dm_sent_at: '2026-11-18 12:05:00', status: 'opening_sent',
+  });
+  await db.createRecipient({
+    account_id: account.id, automation_id: cake.id, comment_id: 'k1', username: 'dana_cake',
+    opening_sent_at: '2026-11-18 13:00:00', dm_sent_at: '2026-11-18 13:00:00', status: 'opening_sent',
+  });
+  await db.createRecipient({
+    account_id: account.id, automation_id: cake.id, comment_id: 'k2', username: 'lina_cake',
+    opening_sent_at: '2026-11-18 13:05:00', dm_sent_at: '2026-11-18 13:05:00', status: 'opening_sent',
+  });
+
+  const commentsByMedia = {
+    media_hakana: [
+      kwComment({ id: 'c1', username: 'idan_azarya_', text: 'הכנה' }),
+      kwComment({ id: 'c2', username: 'esther16930', text: 'הכנה בבקשה' }),
+      kwComment({ id: 'c3', username: 'maya1', text: 'הכנה', ownerReply: 'שלחתי לך בפרטי בעבר 💗' }),
+      kwComment({ id: 'c4', username: 'maya2', text: 'הכנה', ownerReply: 'היי, כבר כתבתי לך 💗' }),
+      kwComment({ id: 'c5', username: 'maya3', text: 'הכנה!', ownerReply: 'מחכה לך בקורס 💗' }),
+      kwComment({ id: 'c6', username: 'maya4', text: 'הכנה', ownerReply: 'כתבתי בפרטי 💗' }),
+      kwComment({ id: 'c7', username: 'maya5', text: 'הכנה', ownerReply: 'מענה ידני 💗' }),
+    ],
+    media_cake: [
+      kwComment({ id: 'k1', username: 'dana_cake', text: 'עוגה' }),
+      kwComment({ id: 'k2', username: 'lina_cake', text: 'עוגה בבקשה' }),
+    ],
+  };
+  const instagram = {
+    async listMedia() {
+      return [
+        { id: 'media_hakana', caption: 'הגיבי הכנה', timestamp: '2026-11-10T10:00:00+0000', like_count: 10, comments_count: 7, media_type: 'VIDEO', media_product_type: 'REELS' },
+        { id: 'media_cake', caption: 'עוגה', timestamp: '2026-11-12T10:00:00+0000', like_count: 8, comments_count: 2, media_type: 'VIDEO', media_product_type: 'REELS' },
+      ];
+    },
+    async findMedia(_account, { mediaId }) {
+      const all = await this.listMedia();
+      return all.find((m) => m.id === mediaId) || null;
+    },
+    async listMediaComments(_account, mediaId) {
+      return (commentsByMedia[mediaId] || []).flatMap((c) => [c, ...(c.replies || [])]);
+    },
+  };
+
+  const data = await collectInsights({ db, instagram, account, days: 30, now: NOW });
+  const h = data.funnels.find((f) => f.name === 'הכנה');
+  const c = data.funnels.find((f) => f.name === 'עוגה');
+  assert.equal(h.comments_matched, 7);
+  assert.equal(h.sent, 2);
+  assert.equal(h.handled_by_owner, 5);
+  assert.equal(c.comments_matched, 2);
+  assert.equal(c.sent, 2);
+  assert.equal(c.handled_by_owner, 0);
+  await db.close();
+});
+
+test('partner seed is idempotent and only runs when the account has no partners', async () => {
+  const db = await createDb(':memory:');
+  const userId = await db.createUser();
+  const empty = await db.upsertAccount({ userId, igUserId: 'ig_empty', username: 'empty_acc', name: 'Empty', accessToken: 'tok' });
+  const kept = await db.upsertAccount({ userId, igUserId: 'ig_kept', username: 'kept_acc', name: 'Kept', accessToken: 'tok' });
+  await db.createPartner({ account_id: kept.id, name: 'קיימת', handle: 'existing_one', category: 'other', status: 'idea' });
+
+  const first = await seedPartnersIfEmpty(db, empty.id);
+  assert.ok(first.seeded >= 11);
+  const second = await seedPartnersIfEmpty(db, empty.id);
+  assert.equal(second.skipped, true);
+  assert.equal(second.seeded, 0);
+  assert.equal((await db.listPartners(empty.id)).length, first.seeded);
+
+  const skipped = await seedPartnersIfEmpty(db, kept.id);
+  assert.equal(skipped.skipped, true);
+  const keptRows = await db.listPartners(kept.id);
+  assert.equal(keptRows.length, 1);
+  assert.equal(keptRows[0].handle, 'existing_one');
+  await db.close();
+});
+
+test('GET /api/partners seeds the curated list for a production-like account', async () => {
+  await withApp(async ({ port }) => {
+    const login = await fetch(`http://127.0.0.1:${port}/auth/mock-login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: 'rona_live' }),
+    });
+    assert.equal(login.status, 200);
+    const cookie = login.headers.get('set-cookie');
+    const first = await (await fetch(`http://127.0.0.1:${port}/api/partners`, { headers: { cookie } })).json();
+    assert.ok(first.partners.length >= 11);
+    assert.ok(first.partners.some((p) => p.handle === 'gil_dror'));
+    const second = await (await fetch(`http://127.0.0.1:${port}/api/partners`, { headers: { cookie } })).json();
+    assert.equal(second.partners.length, first.partners.length);
+  });
+});
+
+test('insights cache returns immediately and refreshes in the background when stale', async () => {
+  clearInsightsCache();
+  let calls = 0;
+  const collect = async () => {
+    calls += 1;
+    await new Promise((r) => setTimeout(r, 40));
+    return { generated_at: 't' + calls, trends: { n: calls }, period_days: 30 };
+  };
+  const account = { id: 99 };
+  const first = await getCachedInsights({ collect, account, days: 30, wait: true, ttlMs: 30 });
+  assert.equal(first.cached, false);
+  assert.equal(first.trends.n, 1);
+  assert.equal(calls, 1);
+
+  const hit = await getCachedInsights({ collect, account, days: 30, wait: true, ttlMs: 30_000 });
+  assert.equal(hit.cached, true);
+  assert.equal(hit.stale, false);
+  assert.equal(hit.trends.n, 1);
+  assert.equal(calls, 1);
+
+  await new Promise((r) => setTimeout(r, 40));
+  const stale = await getCachedInsights({ collect, account, days: 30, wait: false, ttlMs: 20, now: Date.now() });
+  assert.equal(stale.cached, true);
+  assert.equal(stale.stale, true);
+  assert.equal(stale.refreshing, true);
+  assert.equal(stale.trends.n, 1);
+
+  const fresh = await getCachedInsights({ collect, account, days: 30, wait: true, ttlMs: 20 });
+  assert.equal(fresh.cached, false);
+  assert.equal(fresh.stale, false);
+  assert.equal(fresh.trends.n, 2);
+  assert.equal(calls, 2);
+  clearInsightsCache();
+});
+
+test('GET /api/insights serves cached payload on the second request', async () => {
+  await withApp(async ({ port }) => {
+    const login = await fetch(`http://127.0.0.1:${port}/auth/mock-login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: 'rona_demo' }),
+    });
+    const cookie = login.headers.get('set-cookie');
+    const first = await (await fetch(`http://127.0.0.1:${port}/api/insights?days=30`, { headers: { cookie } })).json();
+    assert.equal(first.cached, false);
+    assert.ok(first.trends);
+    const second = await (await fetch(`http://127.0.0.1:${port}/api/insights?days=30&wait=0`, { headers: { cookie } })).json();
+    assert.equal(second.cached, true);
+    assert.equal(second.stale, false);
+    assert.equal(second.generated_at, first.generated_at);
+  });
+});
+
+test('serialized automations expose has_tracked_link only when a button URL exists', async () => {
+  await withApp(async ({ port, db }) => {
+    const login = await fetch(`http://127.0.0.1:${port}/auth/mock-login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: 'rona_demo' }),
+    });
+    const cookie = login.headers.get('set-cookie');
+    const me = await (await fetch(`http://127.0.0.1:${port}/auth/me`, { headers: { cookie } })).json();
+    const bare = await db.createAutomation({
+      account_id: me.account.id,
+      name: 'בלי כפתור',
+      keywords: 'שלום',
+      status: 'paused',
+      second_dm_link_url: '',
+    });
+    const list = await (await fetch(`http://127.0.0.1:${port}/api/automations`, { headers: { cookie } })).json();
+    const autos = list.automations || list;
+    const withLink = autos.find((a) => a.second_dm_link_url);
+    const without = autos.find((a) => a.id === bare.id || a.name === 'בלי כפתור');
+    assert.ok(withLink);
+    assert.equal(withLink.has_tracked_link, true);
+    assert.ok(without);
+    assert.equal(without.has_tracked_link, false);
+  });
+});
+
+test('requiring db.js does not load experimental node:sqlite until a sqlite db is opened', () => {
+  const { spawnSync } = require('child_process');
+  const script = `
+    let warned = false;
+    process.on('warning', (w) => {
+      if (/sqlite/i.test(String(w.message || '')) || w.name === 'ExperimentalWarning') {
+        warned = true;
+        console.error('WARN', w.name, w.message);
+      }
+    });
+    require(${JSON.stringify(require('path').resolve(__dirname + '/../src/db'))});
+    setTimeout(() => process.exit(warned ? 2 : 0), 80);
+  `;
+  const result = spawnSync(process.execPath, ['-e', script], { encoding: 'utf8', timeout: 5000 });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
 });

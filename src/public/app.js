@@ -20,6 +20,7 @@ const state = {
   insights: null,
   insightsDays: 30,
   insightsLoading: false,
+  insightsRefreshing: false,
   partners: [],
   partnerEditor: null,
   assistant: null,
@@ -671,7 +672,9 @@ function automationCard(a) {
     ),
     h('div', { class: 'metrics' },
       h('span', {}, 'נשלחו ', h('b', {}, String(metrics.total_sends || 0))),
-      h('span', {}, 'הקליקו ', h('b', {}, String(metrics.total_clicks || 0))),
+      (a.has_tracked_link || String(a.second_dm_link_url || '').trim())
+        ? h('span', {}, 'הקליקו ', h('b', {}, String(metrics.total_clicks || 0)))
+        : null,
     ),
     h('div', { class: 'row-actions' },
       h('label', { class: 'switch', title: 'הפעלה' },
@@ -1128,21 +1131,52 @@ function sparkline(values, color) {
   return svg;
 }
 
-async function loadInsights() {
-  state.insightsLoading = true;
-  render();
+async function refreshInsightsInBackground(days, prevGenerated) {
+  state.insightsRefreshing = true;
   try {
-    const days = state.insightsDays === 7 ? 7 : 30;
+    const data = await api('/api/insights?days=' + days + '&wait=1');
+    if (data && (data.trends || data.funnels)) {
+      if (!prevGenerated || data.generated_at !== prevGenerated || !data.stale) {
+        state.insights = data;
+      }
+    }
+  } catch (err) {
+    /* keep the cached view */
+  } finally {
+    state.insightsRefreshing = false;
+    render();
+  }
+}
+
+async function loadInsights() {
+  const days = state.insightsDays === 7 ? 7 : 30;
+  const hasData = !!(state.insights && Number(state.insights.period_days) === days);
+  if (hasData) {
+    state.insightsRefreshing = true;
+    render();
+  } else {
+    state.insightsLoading = true;
+    render();
+  }
+  try {
+    const qs = 'days=' + days + (hasData ? '&wait=0' : '');
     const [data, partners] = await Promise.all([
-      api('/api/insights?days=' + days),
-      api('/api/partners').catch(() => ({ partners: [] })),
+      api('/api/insights?' + qs),
+      api('/api/partners').catch(() => ({ partners: state.partners || [] })),
     ]);
-    state.insights = data;
     state.partners = partners.partners || [];
+    if (data && (data.trends || data.funnels)) state.insights = data;
   } catch (err) {
     state.toast = err.message || 'לא הצלחתי לטעון נתונים';
   } finally {
     state.insightsLoading = false;
+    render();
+  }
+  const current = state.insights;
+  if (current && (current.stale || current.refreshing) && Number(current.period_days) === days) {
+    refreshInsightsInBackground(days, current.generated_at);
+  } else {
+    state.insightsRefreshing = false;
     render();
   }
 }
@@ -1160,6 +1194,9 @@ function renderInsightsPage() {
       h('div', { class: 'ins-kicker' }, 'המבט השבועי שלך'),
       h('h2', {}, 'הנתונים שלך'),
       h('p', {}, 'מה עובד, לאן הקהל זז, ואיך האוטומציות מביאות לידים — בלי רעש מיותר.'),
+      (state.insightsRefreshing || (state.insights && state.insights.stale))
+        ? h('p', { class: 'muted ins-refresh' }, 'מעדכנת נתונים…')
+        : null,
       h('div', { class: 'seg' },
         h('button', {
           class: state.insightsDays === 7 ? 'active' : '',
