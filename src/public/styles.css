@@ -337,3 +337,23 @@ pre { margin: 0; white-space: pre-wrap; word-break: break-word; font-size: 0.75r
 .audit-flag { font-size: 0.85rem; font-weight: 700; }
 .audit-flag.is-ok { color: #1a7f4c; }
 .audit-flag.is-missing { color: #b42318; }
+
+.audit-controls select.audit-select {
+  flex: 1; border: 1.5px solid var(--line); border-radius: 12px;
+  padding: 10px 12px; background: var(--surface); min-width: 0;
+  font: inherit; color: inherit;
+}
+.journal-item {
+  padding: 10px 0; border-bottom: 1px solid var(--line);
+  display: grid; gap: 4px;
+}
+.journal-item:last-child { border-bottom: 0; }
+.journal-time { color: var(--muted); font-size: 0.8rem; }
+.journal-main { font-size: 0.95rem; }
+.journal-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.journal-flag {
+  display: inline-block; border-radius: 999px; padding: 2px 8px;
+  font-size: 0.75rem; font-weight: 700;
+}
+.journal-flag.is-ok { background: var(--live-soft); color: #0f7a4a; }
+.journal-flag.is-error { background: var(--danger-soft); color: var(--danger); }
