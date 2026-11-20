@@ -150,14 +150,37 @@ function messagesPath(account) {
   return `/${account.ig_user_id}/messages`;
 }
 
-async function graphFetch(url, { method = 'GET', token, body } = {}) {
+const GRAPH_TIMEOUT_MS = 10000;
+
+function graphAbortSignal(ms) {
+  if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function') {
+    return AbortSignal.timeout(ms);
+  }
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(), ms);
+  if (typeof t.unref === 'function') t.unref();
+  return controller.signal;
+}
+
+async function graphFetch(url, { method = 'GET', token, body, timeoutMs = GRAPH_TIMEOUT_MS } = {}) {
   const headers = { Authorization: `Bearer ${token}` };
   let payload;
   if (body !== undefined) {
     headers['Content-Type'] = 'application/json';
     payload = JSON.stringify(body);
   }
-  const res = await fetch(url, { method, headers, body: payload });
+  let res;
+  try {
+    res = await fetch(url, { method, headers, body: payload, signal: graphAbortSignal(timeoutMs) });
+  } catch (err) {
+    if (err && (err.name === 'AbortError' || err.name === 'TimeoutError')) {
+      const timeout = new Error(`Graph API timeout after ${timeoutMs}ms`);
+      timeout.status = 504;
+      timeout.code = 'graph_timeout';
+      throw timeout;
+    }
+    throw err;
+  }
   const text = await res.text();
   let json;
   try {

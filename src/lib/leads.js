@@ -27,6 +27,11 @@ function normalizeLeadSource(value, fallback = 'comment') {
   return LEAD_SOURCES.includes(s) ? s : fallback;
 }
 
+function sameRecordId(a, b) {
+  if (a == null || b == null || a === '' || b === '') return false;
+  return String(a) === String(b);
+}
+
 function parseLeadFields(raw) {
   if (!raw) return {};
   if (typeof raw === 'object' && !Array.isArray(raw)) return { ...raw };
@@ -88,8 +93,8 @@ function recipientToLeadDraft(recipient, { accountId } = {}) {
 
 function buildAutomationFunnel(automation, { recipients = [], leads = [] } = {}) {
   const autoId = automation?.id;
-  const recs = (recipients || []).filter((r) => Number(r.automation_id) === Number(autoId));
-  const autoLeads = (leads || []).filter((l) => Number(l.automation_id) === Number(autoId));
+  const recs = (recipients || []).filter((r) => sameRecordId(r.automation_id, autoId));
+  const autoLeads = (leads || []).filter((l) => sameRecordId(l.automation_id, autoId));
 
   const commentsMatched = Math.max(
     recs.length,
@@ -142,8 +147,33 @@ function buildAutomationFunnel(automation, { recipients = [], leads = [] } = {})
   };
 }
 
+/**
+ * Overlay audit-tab classification onto the per-automation funnel so
+ * "comments / sent / handled by owner" match בדיקה.
+ */
+function funnelFromAudit(automation, audit, ctx = {}) {
+  const base = buildAutomationFunnel(automation, ctx);
+  const items = audit && Array.isArray(audit.items) ? audit.items : null;
+  if (!items) return { ...base, source: 'recipients' };
+  const commentsMatched = items.length;
+  const sent = items.filter((i) => i.dm_ok || i.dm_status === 'already_got_dm').length;
+  const handledByOwner = items.filter((i) => i.dm_status === 'handled_by_owner' && !i.dm_ok).length;
+  return {
+    ...base,
+    comments_matched: commentsMatched,
+    sent,
+    handled_by_owner: handledByOwner,
+    conversion_rate: commentsMatched ? Math.round((base.converted / commentsMatched) * 1000) / 10 : 0,
+    source: 'audit',
+  };
+}
+
 function buildFunnels(automations, ctx) {
-  return (automations || []).map((a) => buildAutomationFunnel(a, ctx));
+  const audits = (ctx && ctx.audits) || {};
+  return (automations || []).map((a) => {
+    const audit = audits[a.id] || audits[String(a.id)] || audits[Number(a.id)] || null;
+    return funnelFromAudit(a, audit, ctx);
+  });
 }
 
 module.exports = {
@@ -156,7 +186,9 @@ module.exports = {
   parseLeadFields,
   statusFromRecipient,
   isHandledByOwner,
+  sameRecordId,
   recipientToLeadDraft,
   buildAutomationFunnel,
+  funnelFromAudit,
   buildFunnels,
 };

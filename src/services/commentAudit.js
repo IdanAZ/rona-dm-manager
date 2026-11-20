@@ -78,7 +78,11 @@ async function collectKeywordCommentAudit(instagram, account, query = {}) {
   let conversations = [];
   let conversationsAvailable = false;
   let tried = [];
-  try {
+  const includeConversations = query.includeConversations !== false;
+  if (!includeConversations) {
+    // Insights funnels reuse audit classification from comment replies + DB
+    // recipients, without the slow conversations crawl.
+  } else try {
     const convResult = await instagram.listConversationsWithMessages(account, {
       participantKeys: authorKeys(comments, account),
     });
@@ -132,6 +136,7 @@ async function collectAutomationAudit(instagram, account, automation, query = {}
     captionPrefix: '',
     keyword: query.keyword || automation.keywords || DEFAULT_KEYWORD,
     now: query.now,
+    includeConversations: query.includeConversations,
     matchComment: (text) => matchesComment({
       text,
       keywordMode: automation.keyword_mode,
@@ -542,6 +547,7 @@ async function sendMissingPublicReply({ db, instagram, engine, account, commentI
 
 module.exports = {
   collectKeywordCommentAudit,
+  collectAutomationAudit,
   collectAutomationsCommentAudit,
   collectCommentAudit,
   authorKeys,
