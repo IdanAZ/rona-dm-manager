@@ -203,7 +203,7 @@ test('assistant API uses fallback without a key, confirm applies, unconfirmed ch
     const status = await (await fetch(`http://127.0.0.1:${port}/api/assistant/status`, { headers: { cookie } })).json();
     assert.equal(status.llm_enabled, false);
     assert.equal(status.fallback, true);
-    assert.match(status.message, /תופעל בקרוב/);
+    assert.match(status.message, /תופעל במלואה בקרוב/);
 
     const chat = await fetch(`http://127.0.0.1:${port}/api/assistant/chat`, {
       method: 'POST',
@@ -305,4 +305,52 @@ test('chatWithAssistant uses LLM tool calls when a key and fetch stub are provid
   assert.equal(result.proposals[0].status, 'pending');
   assert.equal((await db.getAutomation(auto.id)).status, 'live');
   await db.close();
+});
+
+
+test('assistant status and chat expose a string banner, never a message object', async () => {
+  await withApp(async ({ port, cookie }) => {
+    const status = await (await fetch(`http://127.0.0.1:${port}/api/assistant/status`, { headers: { cookie } })).json();
+    assert.equal(typeof status.banner, 'string');
+    assert.equal(typeof status.message, 'string');
+    assert.equal(status.message.includes('[object Object]'), false);
+    assert.match(status.banner, /תופעל במלואה בקרוב/);
+    assert.match(status.banner, /פעולות פשוטות כבר עובדות/);
+
+    const chat = await fetch(`http://127.0.0.1:${port}/api/assistant/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', cookie },
+      body: JSON.stringify({ text: 'מה עובד השבוע?' }),
+    });
+    const body = await chat.json();
+    assert.equal(chat.status, 200);
+    assert.equal(typeof body.message, 'string');
+    assert.equal(typeof body.banner, 'string');
+    assert.equal(body.message.includes('[object Object]'), false);
+    assert.match(body.banner, /תופעל במלואה בקרוב|אפשר לדבר איתי/);
+    assert.equal(typeof body.saved_message, 'object');
+    assert.equal(body.saved_message.role, 'assistant');
+  });
+});
+
+test('showSimulation is off in production even when mock mode is on, unless SHOW_SIMULATION is set', () => {
+  const orig = { ...process.env };
+  process.env.MOCK_MODE = 'true';
+  process.env.NODE_ENV = 'production';
+  delete process.env.SHOW_SIMULATION;
+  delete require.cache[require.resolve('../src/config')];
+  let config = require('../src/config');
+  assert.equal(config.showSimulation, false);
+  process.env.SHOW_SIMULATION = 'true';
+  delete require.cache[require.resolve('../src/config')];
+  config = require('../src/config');
+  assert.equal(config.showSimulation, true);
+  process.env.NODE_ENV = 'development';
+  delete process.env.SHOW_SIMULATION;
+  delete require.cache[require.resolve('../src/config')];
+  config = require('../src/config');
+  assert.equal(config.showSimulation, true);
+  Object.assign(process.env, orig);
+  if (!orig.SHOW_SIMULATION) delete process.env.SHOW_SIMULATION;
+  delete require.cache[require.resolve('../src/config')];
 });

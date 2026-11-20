@@ -269,7 +269,7 @@ function renderShell() {
       navBtn('insights', 'chart', 'נתונים'),
       navBtn('assistant', 'spark', 'העוזרת'),
       navBtn('audit', 'search', 'בדיקה'),
-      state.me.mockMode ? navBtn('sim', 'flask', 'סימולציה') : null,
+      state.me.showSimulation ? navBtn('sim', 'flask', 'סימולציה') : null,
       navBtn('account', 'user', 'חשבון'),
     ),
   );
@@ -1454,12 +1454,21 @@ async function loadAssistant() {
   render();
 }
 
+
+function assistantBannerText(st) {
+  const raw = st && (typeof st.banner === 'string' ? st.banner : (typeof st.message === 'string' ? st.message : ''));
+  if (String(raw).trim()) return String(raw).trim();
+  return st && st.llm_enabled
+    ? 'אפשר לדבר איתי חופשי. פעולות יופיעו לאישור לפני שינוי.'
+    : 'העוזרת החכמה תופעל במלואה בקרוב. בינתיים פעולות פשוטות כבר עובדות.';
+}
+
 function renderAssistantPage() {
   const st = state.assistant || {};
   const wrap = h('div', { class: 'assistant-page' },
     h('div', { class: 'page-head' }, h('h2', {}, 'העוזרת שלך')),
     h('div', { class: 'assistant-banner' + (st.llm_enabled ? ' ready' : '') },
-      st.message || 'העוזרת החכמה תופעל בקרוב. בינתיים אפשר לבקש פעולות פשוטות, ואציע אותן לאישור לפני כל שינוי.'
+      assistantBannerText(st)
     ),
   );
   const log = h('div', { class: 'chat-log' });
@@ -1520,7 +1529,7 @@ async function sendAssistant() {
   render();
   try {
     const res = await api('/api/assistant/chat', { method: 'POST', body: { text, history: state.assistantMessages.slice(-12) } });
-    state.assistant = res;
+    state.assistant = { ...res, message: assistantBannerText(res), banner: assistantBannerText(res) };
     state.assistantMessages = (state.assistantMessages || []).concat([{ role: 'assistant', content: res.reply, proposals: res.proposals || [] }]);
     if (res.proposals && res.proposals.some((p) => p.action === 'create_feature_request')) {
       /* list updates only after confirm */

@@ -230,7 +230,8 @@ ngrok (`ngrok http 3000`) עובד באותו אופן.
 | `FOLLOW_CHECK_MODE` | `stub` או `api` |
 | `FACEBOOK_SCOPES` | גיבוי אם אין `config_id` (ההרשאות האמיתיות מגיעות מהתצורה). בברירת המחדל כלול גם `instagram_manage_insights` |
 | `SUMMARY_EMAIL_TO` | אם מוגדר יחד עם `RESEND_API_KEY` או `SMTP_HOST`, יישלח הסיכום השבועי באימייל. כבוי כשהמשתנים חסרים |
-| `LLM_PROVIDER` / `XAI_API_KEY` / `OPENAI_API_KEY` / `LLM_MODEL` | מפעילים את העוזרת החכמה (chat-completions + tool calling). בלי מפתח מוצג מצב «תופעל בקרוב» עם fallback לכללים |
+| `LLM_PROVIDER` / `XAI_API_KEY` / `OPENAI_API_KEY` / `LLM_MODEL` | מפעילים את העוזרת החכמה (chat-completions + tool calling). בלי מפתח מוצג מצב «תופעל במלואה בקרוב; פעולות פשוטות כבר עובדות» עם fallback לכללים |
+| `SHOW_SIMULATION` | מציג את לשונית «סימולציה» בניווט. ברירת המחדל: רק בהדגמה/פיתוח, מוסתר ב-production. `true` מציג גם בפרודקשן |
 | `FEATURE_REQUEST_WEBHOOK_URL` / `FEATURE_REQUEST_EMAIL` | העברת בקשות שיפור. כבוי אם לא הוגדר |
 | `INSTAGRAM_SCOPES` | ל-`AUTH_MODE=instagram` בלבד |
 | `POLL_INTERVAL_MS` | מרווח הבודק בשרת לתגובות (ברירת מחדל `60000`) |

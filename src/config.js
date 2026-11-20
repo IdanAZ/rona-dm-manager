@@ -23,6 +23,10 @@ const config = {
   host: process.env.HOST || '0.0.0.0',
   nodeEnv: process.env.NODE_ENV || 'development',
   mockMode: bool(process.env.MOCK_MODE, true),
+  // Simulation tab: demo/dev only, or SHOW_SIMULATION=true. Hidden in production unless explicitly enabled.
+  showSimulation: process.env.SHOW_SIMULATION !== undefined && process.env.SHOW_SIMULATION !== ''
+    ? bool(process.env.SHOW_SIMULATION, false)
+    : bool(process.env.MOCK_MODE, true) && (process.env.NODE_ENV || 'development') !== 'production',
   authMode,
   appUrl: String(process.env.APP_URL || process.env.RENDER_EXTERNAL_URL || 'http://localhost:3000').replace(/\/$/, ''),
   sessionSecret: process.env.SESSION_SECRET || 'dev-insecure-change-me',

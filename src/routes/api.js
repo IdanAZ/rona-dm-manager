@@ -528,7 +528,13 @@ function createApiRouter({ db, config, instagram, engine }) {
         db, instagram, config, account: req.account, userText: text, history,
       });
       const status = assistantStatus(config);
-      res.json({ ...status, ...result, message: status.message, saved_message: result.message });
+      res.json({
+        ...status,
+        ...result,
+        banner: status.banner || status.message,
+        message: status.banner || status.message,
+        saved_message: result.message,
+      });
     } catch (err) { next(err); }
   });
 
