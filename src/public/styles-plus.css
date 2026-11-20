@@ -244,3 +244,5 @@ h1, h2, h3, .brand, .page-head h2, .auto-title, .logo-mark {
 .req-item:last-child { border-bottom: 0; }
 .req-item h4 { margin: 0 0 4px; font-size: 0.95rem; }
 .req-item p { margin: 0; color: var(--muted); font-size: 0.88rem; line-height: 1.45; }
+
+.ins-refresh{margin:6px 0 0;font-size:13px;}

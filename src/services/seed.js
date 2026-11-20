@@ -149,11 +149,32 @@ async function seedDemoRecipientsAndLeads(db, accountId, recipeAuto, courseAuto)
   });
 }
 
-async function seedDemoPartners(db, accountId) {
-  if ((await db.countPartners(accountId)) > 0) return;
-  for (const row of partnerSeedForAccount(accountId)) {
+async function seedPartnersIfEmpty(db, accountId) {
+  if (!db || accountId == null) return { seeded: 0, skipped: true };
+  const existing = await db.countPartners(accountId);
+  if (existing > 0) return { seeded: 0, skipped: true, existing };
+  const rows = partnerSeedForAccount(accountId);
+  let seeded = 0;
+  for (const row of rows) {
     await db.createPartner(row);
+    seeded += 1;
   }
+  return { seeded, skipped: false };
+}
+
+async function seedDemoPartners(db, accountId) {
+  return seedPartnersIfEmpty(db, accountId);
+}
+
+async function seedPartnersForExistingAccounts(db) {
+  const accounts = typeof db.listAccounts === 'function'
+    ? await db.listAccounts()
+    : (await db.listAccountsWithTokens());
+  const results = [];
+  for (const acc of accounts || []) {
+    results.push({ account_id: acc.id, ...(await seedPartnersIfEmpty(db, acc.id)) });
+  }
+  return results;
 }
 
 async function seedDemoWeeklySummary(db, accountId, instagram, account) {
@@ -208,4 +229,4 @@ async function seedDemoInsights(db, accountId, instagram, account) {
   return { recipe, course };
 }
 
-module.exports = { seedDemoAutomation, seedDemoInsights, seedCourseAutomation };
+module.exports = { seedDemoAutomation, seedDemoInsights, seedCourseAutomation, seedPartnersIfEmpty, seedPartnersForExistingAccounts, seedDemoPartners };
