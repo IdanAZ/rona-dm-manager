@@ -17,7 +17,7 @@ const { createDb } = require('../src/db');
 const { createInstagramClient } = require('../src/services/instagram');
 const { createEngine } = require('../src/services/engine');
 const { createApp } = require('../src/app');
-const { sendManualOpeningDm } = require('../src/services/commentAudit');
+const { sendManualOpeningDm, attachRecipientFlags } = require('../src/services/commentAudit');
 const { processPayload, mockCommentPayload } = require('../src/routes/webhooks');
 
 const ACCOUNT = { username: 'ronaazarya_midwife', ig_user_id: '17841401150112850' };
@@ -509,5 +509,181 @@ test('audit by automation_id uses that post, not the default הכנה caption pr
   assert.equal((legacy.items || []).length, 0);
 
   await attachRecipientFlags(db, account, cakeOnly);
+  await db.close();
+});
+
+
+test('owner public reply without a DM is handled_by_owner, not eligible', async () => {
+  const comments = [
+    comment({
+      id: 'c_esther',
+      text: 'הכנה',
+      username: 'esther16930',
+      hoursAgo: 10,
+      replies: [{ id: 'r_esther', text: 'אצלך בפרטי ❤️', from: { username: ACCOUNT.username, id: ACCOUNT.ig_user_id } }],
+    }),
+    comment({ id: 'c_open', text: 'הכנה', username: 'tamar_eligible', hoursAgo: 8 }),
+  ];
+  const result = buildAudit({
+    media: { id: 'm1', caption: 'הגיבי ״הכנה״ ואשלח לך את כל הפרטים❤️' },
+    comments,
+    conversations: [],
+    account: ACCOUNT,
+    keyword: 'הכנה',
+    now: NOW,
+    conversationsAvailable: true,
+  });
+  const byUser = Object.fromEntries(result.items.map((i) => [i.username, i]));
+  assert.equal(byUser.esther16930.dm_status, 'handled_by_owner');
+  assert.equal(byUser.esther16930.public_reply, true);
+  assert.equal(byUser.tamar_eligible.dm_status, 'eligible_private_reply');
+  assert.equal(result.counts.handled_by_owner, 1);
+  assert.equal(result.counts.eligible_private_reply, 1);
+  assert.equal(result.groups.eligible_private_reply.some((i) => i.username === 'esther16930'), false);
+
+  const db = await createDb(':memory:');
+  const userId = await db.createUser();
+  const account = await db.upsertAccount({
+    userId,
+    igUserId: ACCOUNT.ig_user_id,
+    username: ACCOUNT.username,
+    name: 'רונה',
+    accessToken: 'mock-token',
+    accountType: 'MEDIA_CREATOR',
+  });
+  await attachRecipientFlags(db, account, result);
+  const esther = result.items.find((i) => i.username === 'esther16930');
+  assert.equal(esther.dm_status, 'handled_by_owner');
+  assert.equal(esther.can_send, false);
+  assert.equal(esther.can_send_public_reply, false);
+  const tamar = result.items.find((i) => i.username === 'tamar_eligible');
+  assert.equal(tamar.can_send, true);
+  await db.close();
+});
+
+test('conversations unavailable still marks an owner public reply as handled_by_owner', () => {
+  const result = buildAudit({
+    media: { id: 'm1', caption: 'הגיבי ״הכנה״ ואשלח לך את כל הפרטים❤️' },
+    comments: [comment({
+      id: 'c1',
+      text: 'הכנה',
+      username: 'mirit',
+      hoursAgo: 5,
+      replies: [{ id: 'r1', text: 'שלחתי לך בפרטי ❤️', from: { username: ACCOUNT.username, id: ACCOUNT.ig_user_id } }],
+    })],
+    conversations: [],
+    account: ACCOUNT,
+    keyword: 'הכנה',
+    now: NOW,
+    conversationsAvailable: false,
+  });
+  assert.equal(result.items[0].dm_status, 'handled_by_owner');
+  assert.equal(result.items[0].borderline_reason, null);
+  assert.equal(result.counts.handled_by_owner, 1);
+  assert.equal(result.counts.unknown_dm, 0);
+});
+
+test('app-recorded public reply with no DM stays eligible so a missing DM can still be sent', async () => {
+  const db = await createDb(':memory:');
+  const userId = await db.createUser();
+  const account = await db.upsertAccount({
+    userId,
+    igUserId: ACCOUNT.ig_user_id,
+    username: ACCOUNT.username,
+    name: 'רונה',
+    accessToken: 'mock-token',
+    accountType: 'MEDIA_CREATOR',
+  });
+  const auto = await db.createAutomation({
+    account_id: account.id,
+    name: 'הכנה',
+    status: 'live',
+    trigger_scope: 'specific',
+    media_id: 'm1',
+    keyword_mode: 'keywords',
+    keywords: 'הכנה',
+    match_type: 'whole_word',
+  });
+  const rec = await db.createRecipient({
+    automation_id: auto.id,
+    account_id: account.id,
+    comment_id: 'c_app',
+    igsid: 'id_noa',
+    username: 'noa',
+    status: 'pending',
+  });
+  await db.updateRecipient(rec.id, { public_reply_sent_at: '2026-11-20 10:00:00' });
+  await db.recordObservedPublicReply({ commentId: 'c_app', accountId: account.id, recipientId: rec.id, source: 'app' });
+
+  const result = buildAudit({
+    media: { id: 'm1', caption: 'הגיבי ״הכנה״ ואשלח לך את כל הפרטים❤️' },
+    comments: [comment({
+      id: 'c_app',
+      text: 'הכנה',
+      username: 'noa',
+      hoursAgo: 4,
+      replies: [{ id: 'r_app', text: 'שלחתי לך בפרטי ❤️', from: { username: ACCOUNT.username, id: ACCOUNT.ig_user_id } }],
+    })],
+    conversations: [],
+    account: ACCOUNT,
+    keyword: 'הכנה',
+    now: NOW,
+    conversationsAvailable: true,
+  });
+  assert.equal(result.items[0].dm_status, 'handled_by_owner');
+  await attachRecipientFlags(db, account, result);
+  assert.equal(result.items[0].dm_status, 'eligible_private_reply');
+  assert.equal(result.items[0].can_send, true);
+  assert.equal(result.items[0].app_public_reply, true);
+  await db.close();
+});
+
+test('listOutbound fills automation name and username from comment_id when joins are empty', async () => {
+  const db = await createDb(':memory:');
+  const userId = await db.createUser();
+  const account = await db.upsertAccount({
+    userId,
+    igUserId: ACCOUNT.ig_user_id,
+    username: ACCOUNT.username,
+    name: 'רונה',
+    accessToken: 'mock-token',
+    accountType: 'MEDIA_CREATOR',
+  });
+  const auto = await db.createAutomation({
+    account_id: account.id,
+    name: 'עוגה',
+    status: 'live',
+    trigger_scope: 'specific',
+    media_id: 'm_cake',
+    keyword_mode: 'keywords',
+    keywords: 'עוגה',
+    match_type: 'whole_word',
+  });
+  await db.createRecipient({
+    automation_id: auto.id,
+    account_id: account.id,
+    comment_id: 'c_journal',
+    igsid: 'id_noa',
+    username: 'noa_cake',
+    status: 'opening_sent',
+  });
+  await db.logOutbound({
+    accountId: account.id,
+    type: 'comment_reply',
+    payload: { type: 'comment_reply', comment_id: 'c_journal', message: 'שלחתי לך בפרטי ❤️' },
+    mock: true,
+  });
+  await db.logOutbound({
+    accountId: account.id,
+    type: 'private_reply',
+    payload: { body: { recipient: { comment_id: 'c_journal' }, message: { text: 'היי' } } },
+    mock: true,
+  });
+  const logs = await db.listOutbound({ accountId: account.id, limit: 10 });
+  assert.equal(logs.length, 2);
+  for (const row of logs) {
+    assert.equal(row.automation_name, 'עוגה');
+    assert.equal(row.recipient_username, 'noa_cake');
+  }
   await db.close();
 });
