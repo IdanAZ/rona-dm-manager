@@ -11,6 +11,10 @@ const state = {
   toast: '',
   loading: false,
   installPrompt: null,
+  audit: null,
+  auditLoading: false,
+  auditError: '',
+  auditKeyword: 'הכנה',
 };
 
 if ('serviceWorker' in navigator) {
@@ -73,6 +77,7 @@ function icon(name) {
     home: '<path d="M4 10.5 12 4l8 6.5V20a1 1 0 0 1-1 1h-5v-6H10v6H5a1 1 0 0 1-1-1z" fill="currentColor"/>',
     flask: '<path d="M9 3h6v2h-1v5.2l5.6 8.4A1.5 1.5 0 0 1 18.4 21H5.6a1.5 1.5 0 0 1-1.2-2.4L10 10.2V5H9V3z" fill="currentColor"/>',
     user: '<path d="M12 12a4 4 0 1 0-4-4 4 4 0 0 0 4 4zm0 2c-4 0-8 2-8 5v1h16v-1c0-3-4-5-8-5z" fill="currentColor"/>',
+    search: '<path d="M10.5 4a6.5 6.5 0 1 1 0 13 6.5 6.5 0 0 1 0-13zm0 2a4.5 4.5 0 1 0 0 9 4.5 4.5 0 0 0 0-9z" fill="currentColor"/><path d="m15.2 14.1 4.2 4.2-1.4 1.4-4.2-4.2z" fill="currentColor"/>',
   };
   const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
   svg.setAttribute('viewBox', '0 0 24 24');
@@ -239,11 +244,13 @@ function renderShell() {
     ),
     h('main', { class: 'page' },
       state.tab === 'autos' ? renderAutosPage() :
+      state.tab === 'audit' ? renderAuditPage() :
       state.tab === 'sim' ? renderSimPage() :
       renderAccountPage()
     ),
     h('nav', { class: 'bottom-nav' },
       navBtn('autos', 'home', 'אוטומציות'),
+      navBtn('audit', 'search', 'בדיקה'),
       state.me.mockMode ? navBtn('sim', 'flask', 'סימולציה') : null,
       navBtn('account', 'user', 'חשבון'),
     ),
@@ -268,9 +275,130 @@ function navBtn(id, ic, label) {
     onClick: async () => {
       state.tab = id;
       if (id === 'sim') await loadLogs().catch(() => {});
+      if (id === 'audit' && !state.audit && !state.auditLoading) runAudit().catch(() => {});
       render();
     },
   }, icon(ic), label);
+}
+
+
+async function runAudit() {
+  state.auditLoading = true;
+  state.auditError = '';
+  render();
+  try {
+    const q = new URLSearchParams({
+      keyword: state.auditKeyword || 'הכנה',
+      caption_prefix: 'הגיבי "הכנה" ואשלח לך את כל הפרטים',
+    });
+    state.audit = await api('/api/audit/keyword-comments?' + q.toString());
+  } catch (err) {
+    state.auditError = err.message || 'הבדיקה נכשלה';
+  } finally {
+    state.auditLoading = false;
+    render();
+  }
+}
+
+function auditPill(item) {
+  if (item.borderline && item.dm_status === 'already_got_dm') return h('span', { class: 'pill pill-border' }, 'גבולי — כבר קיבלה DM');
+  if (item.borderline && item.borderline_reason === 'prior_dm_only') return h('span', { class: 'pill pill-border' }, 'גבולי — DM רק לפני התגובה');
+  if (item.dm_status === 'already_got_dm') return h('span', { class: 'pill pill-ok' }, 'כבר קיבלה DM');
+  if (item.dm_status === 'eligible_private_reply') return h('span', { class: 'pill pill-wait' }, 'זכאית לתשובה פרטית');
+  if (item.dm_status === 'not_eligible') return h('span', { class: 'pill pill-late' }, 'עברו 7 ימים');
+  return h('span', { class: 'pill pill-unk' }, 'לא ידוע אם נשלח DM');
+}
+
+function sourceLabel(item) {
+  if (item.dm_source === 'automated') return 'נראה אוטומטי (ManyChat / תבנית)';
+  if (item.dm_source === 'manual') return 'נראה ידני';
+  if (item.dm_source === 'unclear') return 'לא ברור אם ידני או אוטומטי';
+  return null;
+}
+
+function reasonLabel(reason) {
+  const map = {
+    unrelated_content: 'נשלח DM אחרי התגובה, אבל התוכן לא נראה קשור להכנה ללידה',
+    prior_dm_only: 'יש שיחה קודמת, אבל לא נמצא DM אחרי התגובה הזו',
+    conversations_unavailable: 'לא הצלחנו לקרוא את שיחות ה-DM',
+  };
+  return map[reason] || reason;
+}
+
+function renderAuditItem(item) {
+  return h('div', { class: 'audit-item' },
+    h('div', { class: 'row' },
+      atUser(item.username || 'unknown'),
+      auditPill(item),
+    ),
+    h('div', { class: 'muted' }, item.comment_text || ''),
+    h('div', { class: 'muted' },
+      (item.timestamp_jerusalem || '') + (item.age_days != null ? ` · לפני ${item.age_days} ימים` : '')
+    ),
+    item.public_reply ? h('div', { class: 'muted' }, 'יש תגובה ציבורית מרונה' + (item.public_reply_snippet ? `: “${item.public_reply_snippet}”` : '')) : h('div', { class: 'muted' }, 'אין תגובה ציבורית מרונה'),
+    sourceLabel(item) ? h('div', { class: 'muted' }, sourceLabel(item)) : null,
+    item.borderline && item.borderline_reason ? h('div', { class: 'muted' }, reasonLabel(item.borderline_reason)) : null,
+    item.dm_snippet ? h('div', { class: 'snippet' }, `קטע מה-DM: “${item.dm_snippet}”`) : null,
+  );
+}
+
+function renderAuditGroup(title, items) {
+  if (!items || !items.length) return null;
+  return h('section', { class: 'audit-section card' },
+    h('h3', {}, `${title} (${items.length})`),
+    ...items.map(renderAuditItem),
+  );
+}
+
+function renderAuditPage() {
+  const wrap = h('div', {});
+  wrap.append(
+    h('div', { class: 'page-head' }, h('h2', {}, 'מי כבר קיבל הודעה')),
+    h('p', { class: 'audit-note' }, 'בדיקה לקריאה בלבד: התגובות עם מילת המפתח, והאם רונה כבר שלחה DM (גם ידני). לא נשלחות הודעות מכאן.'),
+    h('div', { class: 'audit-controls' },
+      h('input', {
+        value: state.auditKeyword,
+        onInput: (e) => { state.auditKeyword = e.target.value; },
+        placeholder: 'מילת מפתח, למשל הכנה',
+      }),
+      h('button', {
+        class: 'btn btn-sm',
+        disabled: state.auditLoading,
+        onClick: () => runAudit(),
+      }, state.auditLoading ? 'בודק…' : 'הרצה'),
+    ),
+  );
+  if (state.auditError) wrap.append(h('div', { class: 'err-list' }, state.auditError));
+  if (state.auditLoading && !state.audit) wrap.append(h('p', { class: 'muted' }, 'סורק תגובות ושיחות… זה עלול לקחת יותר מדקה.'));
+  const a = state.audit;
+  if (!a) return wrap;
+  if (a.media) {
+    wrap.append(h('p', { class: 'muted' }, a.media.permalink
+      ? h('a', { href: a.media.permalink, target: '_blank', rel: 'noopener' }, a.media.caption || 'הפוסט שנבדק')
+      : (a.media.caption || 'הפוסט שנבדק')));
+  }
+  if (a.errors && a.errors.length) {
+    wrap.append(h('div', { class: 'err-list' },
+      'חלק מהקריאות ל-API נכשלו: ',
+      a.errors.map((e) => `${e.endpoint || ''}: ${e.message}`).join(' | '),
+    ));
+  }
+  const c = a.counts || {};
+  wrap.append(h('div', { class: 'audit-counts' },
+    h('div', { class: 'audit-count' }, h('b', {}, String(c.total || 0)), h('span', {}, 'תגובות עם המילה')),
+    h('div', { class: 'audit-count' }, h('b', {}, String(c.already_got_dm || 0)), h('span', {}, 'כבר קיבלו DM')),
+    h('div', { class: 'audit-count' }, h('b', {}, String(c.eligible_private_reply || 0)), h('span', {}, 'זכאים (עד 7 ימים)')),
+    h('div', { class: 'audit-count' }, h('b', {}, String(c.not_eligible || 0)), h('span', {}, 'עברו 7 ימים')),
+  ));
+  const g = a.groups || {};
+  wrap.append(
+    renderAuditGroup('כבר קיבלו DM', g.already_got_dm),
+    renderAuditGroup('זכאים לתשובה פרטית (פחות מ־7 ימים, בלי DM אחרי התגובה)', g.eligible_private_reply),
+    renderAuditGroup('לא זכאים לתשובה פרטית (עברו 7 ימים)', g.not_eligible),
+    renderAuditGroup('לא ידוע — לא הצלחנו לקרוא שיחות', g.unknown_dm),
+    renderAuditGroup('מקרים גבוליים', g.borderline),
+  );
+  return wrap;
 }
 
 function renderAutosPage() {

@@ -3,6 +3,7 @@ const { requireAuth, requireAccount, publicAccount } = require('./auth');
 const { processPayload, mockCommentPayload, mockPostbackPayload, mockMessagePayload } = require('./webhooks');
 const { randomId } = require('../lib/signatures');
 const { nowSql } = require('../db');
+const { collectKeywordCommentAudit } = require('../services/commentAudit');
 
 function asBool(v, fallback = false) {
   if (v === undefined || v === null || v === '') return fallback;
@@ -86,6 +87,21 @@ function createApiRouter({ db, config, instagram, engine }) {
       res.json({ media });
     } catch (err) {
       res.status(502).json({ error: err.message });
+    }
+  });
+
+
+  router.get('/audit/keyword-comments', requireAccount, async (req, res) => {
+    try {
+      const result = await collectKeywordCommentAudit(instagram, req.account, {
+        keyword: req.query.keyword,
+        captionPrefix: req.query.caption_prefix,
+        mediaId: req.query.media_id,
+      });
+      const status = result.ok ? 200 : (result.error === 'media_not_found' ? 404 : 502);
+      res.status(status).json(result);
+    } catch (err) {
+      res.status(502).json({ ok: false, error: err.message });
     }
   });
 

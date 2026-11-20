@@ -90,6 +90,105 @@ async function graphFetch(url, { method = 'GET', token, body } = {}) {
   return json;
 }
 
+
+async function graphPaginate(url, { token, maxPages = 30, maxItems = 2000 } = {}) {
+  const items = [];
+  let next = url;
+  let pages = 0;
+  while (next && pages < maxPages && items.length < maxItems) {
+    const json = await graphFetch(next, { token });
+    items.push(...(json.data || []));
+    next = json.paging && json.paging.next ? json.paging.next : null;
+    pages += 1;
+  }
+  return items;
+}
+
+function graphErrorInfo(endpoint, err) {
+  const payload = err?.payload?.error || err?.payload || null;
+  return {
+    endpoint,
+    message: err.message,
+    status: err.status || null,
+    code: payload?.code ?? null,
+    error_subcode: payload?.error_subcode ?? null,
+    type: payload?.type ?? null,
+    fbtrace_id: payload?.fbtrace_id ?? null,
+  };
+}
+
+const MEDIA_FIELDS =
+  'id,caption,media_type,media_product_type,media_url,thumbnail_url,permalink,timestamp,like_count,comments_count';
+
+const MOCK_AUDIT_MEDIA = {
+  id: 'mock_media_hakana',
+  caption: 'הגיבי ״הכנה״ ואשלח לך את כל הפרטים❤️',
+  media_type: 'VIDEO',
+  media_product_type: 'REELS',
+  permalink: 'https://www.instagram.com/reel/mock_hakana/',
+  thumbnail_url: 'https://placehold.co/800x1000/f8c8d8/4a1c2b?text=Hakana',
+  timestamp: '2026-11-10T10:00:00+0000',
+  comments_count: 3,
+};
+
+const MOCK_AUDIT_COMMENTS = [
+  {
+    id: 'mock_c_dana',
+    text: 'הכנה❤️',
+    username: 'dana_got_auto',
+    timestamp: '2026-11-19T08:00:00+0000',
+    from: { id: 'id_dana', username: 'dana_got_auto' },
+    parent_id: null,
+    replies: [
+      {
+        id: 'mock_r_dana',
+        text: 'שלחתי לך הודעה בפרטי ❤️',
+        username: 'rona_demo',
+        timestamp: '2026-11-19T08:01:00+0000',
+        from: { id: 'mock_ig_rona_demo', username: 'rona_demo' },
+      },
+    ],
+  },
+  {
+    id: 'mock_c_tamar',
+    text: 'הכנה',
+    username: 'tamar_eligible',
+    timestamp: '2026-11-19T20:00:00+0000',
+    from: { id: 'id_tamar', username: 'tamar_eligible' },
+    parent_id: null,
+    replies: [],
+  },
+  {
+    id: 'mock_c_shira',
+    text: '״הכנה״',
+    username: 'shira_old',
+    timestamp: '2026-10-01T10:00:00+0000',
+    from: { id: 'id_shira', username: 'shira_old' },
+    parent_id: null,
+    replies: [],
+  },
+];
+
+const MOCK_AUDIT_CONVERSATIONS = [
+  {
+    id: 'mock_conv_dana',
+    participants: {
+      data: [
+        { id: 'id_dana', username: 'dana_got_auto' },
+        { id: 'mock_ig_rona_demo', username: 'rona_demo' },
+      ],
+    },
+    messages: [
+      {
+        id: 'mock_m1',
+        created_time: '2026-11-19T08:01:30+0000',
+        from: { id: 'mock_ig_rona_demo', username: 'rona_demo' },
+        message: 'היי! שמחה שאהבת 😊 רוצה שאשלח לך את הפרטים?',
+      },
+    ],
+  },
+];
+
 function facebookRedirectUri(config) {
   return `${config.appUrl}/auth/facebook/callback`;
 }
@@ -382,6 +481,157 @@ function createInstagramClient({ config, db }) {
             { token: apiToken(acc) }
           ).then((j) => j.data || []),
         () => MOCK_MEDIA.map((m) => ({ ...m }))
+      );
+    },
+
+
+    async findMedia(account, { mediaId, captionPrefix } = {}) {
+      const { captionStartsWith } = require('../lib/audit');
+      return withAccount(
+        account,
+        async (acc) => {
+          if (mediaId) {
+            return graphFetch(
+              graphUrl(config, `/${mediaId}`, { fields: MEDIA_FIELDS }, acc),
+              { token: apiToken(acc) }
+            );
+          }
+          const items = await graphPaginate(
+            graphUrl(config, `/${acc.ig_user_id}/media`, { fields: MEDIA_FIELDS, limit: '50' }, acc),
+            { token: apiToken(acc), maxPages: 20, maxItems: 500 }
+          );
+          if (!captionPrefix) return items[0] || null;
+          return items.find((m) => captionStartsWith(m.caption, captionPrefix)) || null;
+        },
+        () => {
+          if (mediaId && mediaId !== MOCK_AUDIT_MEDIA.id) {
+            const found = MOCK_MEDIA.find((m) => m.id === mediaId);
+            return found ? { ...found } : { ...MOCK_AUDIT_MEDIA, id: mediaId };
+          }
+          if (!captionPrefix) return { ...MOCK_AUDIT_MEDIA };
+          const { captionStartsWith } = require('../lib/audit');
+          if (captionStartsWith(MOCK_AUDIT_MEDIA.caption, captionPrefix)) return { ...MOCK_AUDIT_MEDIA };
+          const found = MOCK_MEDIA.find((m) => captionStartsWith(m.caption, captionPrefix));
+          return found ? { ...found } : null;
+        }
+      );
+    },
+
+    async listMediaComments(account, mediaId) {
+      return withAccount(
+        account,
+        async (acc) => {
+          const comments = await graphPaginate(
+            graphUrl(
+              config,
+              `/${mediaId}/comments`,
+              {
+                fields: 'id,text,username,timestamp,from,replies{id,text,username,timestamp,from}',
+                limit: '50',
+              },
+              acc
+            ),
+            { token: apiToken(acc), maxPages: 40, maxItems: 2000 }
+          );
+          const flat = [];
+          for (const comment of comments) {
+            let replies = (comment.replies && comment.replies.data) || [];
+            const repliesNext = comment.replies && comment.replies.paging && comment.replies.paging.next;
+            if (repliesNext) {
+              const extra = await graphPaginate(repliesNext, { token: apiToken(acc), maxPages: 10, maxItems: 500 });
+              // first page already in replies; paging.next starts at the following page
+              replies = replies.concat(extra);
+            }
+            const mappedReplies = replies.map((r) => ({
+              id: r.id,
+              text: r.text || '',
+              username: r.username || r.from?.username || null,
+              timestamp: r.timestamp,
+              from: r.from || { username: r.username },
+              parent_id: comment.id,
+              replies: [],
+            }));
+            flat.push({
+              id: comment.id,
+              text: comment.text || '',
+              username: comment.username || comment.from?.username || null,
+              timestamp: comment.timestamp,
+              from: comment.from || { username: comment.username },
+              parent_id: null,
+              replies: mappedReplies,
+            });
+            for (const r of mappedReplies) flat.push(r);
+          }
+          return flat;
+        },
+        () => (mediaId === MOCK_AUDIT_MEDIA.id || !mediaId)
+          ? MOCK_AUDIT_COMMENTS.map((c) => ({ ...c, replies: (c.replies || []).map((r) => ({ ...r })) }))
+            .flatMap((c) => [c, ...(c.replies || [])])
+          : []
+      );
+    },
+
+    async listConversationsWithMessages(account, { participantKeys } = {}) {
+      return withAccount(
+        account,
+        async (acc) => {
+          const tried = [];
+          const errors = [];
+          const candidates = [`/${acc.ig_user_id}/conversations`];
+          if (acc.page_id) candidates.push(`/${acc.page_id}/conversations`);
+          candidates.push('/me/conversations');
+
+          let conversations = null;
+          for (const path of candidates) {
+            const endpoint = `${path}?platform=instagram`;
+            tried.push(endpoint);
+            try {
+              conversations = await graphPaginate(
+                graphUrl(config, path, {
+                  platform: 'instagram',
+                  fields: 'id,updated_time,participants{id,username,name}',
+                  limit: '50',
+                }, acc),
+                { token: apiToken(acc), maxPages: 20, maxItems: 500 }
+              );
+              break;
+            } catch (err) {
+              errors.push(graphErrorInfo(endpoint, err));
+            }
+          }
+
+          if (!conversations) {
+            return { ok: false, conversations: [], errors, tried };
+          }
+
+          const keys = new Set((participantKeys || []).map((k) => String(k || '').toLowerCase()).filter(Boolean));
+          const wanted = keys.size
+            ? conversations.filter((c) => {
+                const parts = c.participants?.data || c.participants || [];
+                return parts.some((p) => keys.has(String(p.username || '').toLowerCase()) || keys.has(String(p.id || '')));
+              })
+            : conversations;
+
+          const detailed = [];
+          for (const conv of wanted) {
+            const msgEndpoint = `/${conv.id}/messages`;
+            try {
+              const messages = await graphPaginate(
+                graphUrl(config, msgEndpoint, {
+                  fields: 'id,created_time,from,to,message,attachments',
+                  limit: '50',
+                }, acc),
+                { token: apiToken(acc), maxPages: 10, maxItems: 300 }
+              );
+              detailed.push({ ...conv, messages });
+            } catch (err) {
+              errors.push(graphErrorInfo(msgEndpoint, err));
+              detailed.push({ ...conv, messages: [] });
+            }
+          }
+          return { ok: true, conversations: detailed, errors, tried };
+        },
+        () => ({ ok: true, conversations: MOCK_AUDIT_CONVERSATIONS.map((c) => ({ ...c, messages: [...c.messages] })), errors: [], tried: ['mock'] })
       );
     },
 
