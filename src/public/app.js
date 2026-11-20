@@ -17,6 +17,16 @@ const state = {
   auditKeyword: 'הכנה',
   auditAutomationId: 'all',
   auditAction: {},
+  insights: null,
+  insightsDays: 30,
+  insightsLoading: false,
+  partners: [],
+  partnerEditor: null,
+  assistant: null,
+  assistantMessages: [],
+  assistantText: '',
+  assistantSending: false,
+  featureRequests: [],
 };
 
 if ('serviceWorker' in navigator) {
@@ -80,6 +90,8 @@ function icon(name) {
     flask: '<path d="M9 3h6v2h-1v5.2l5.6 8.4A1.5 1.5 0 0 1 18.4 21H5.6a1.5 1.5 0 0 1-1.2-2.4L10 10.2V5H9V3z" fill="currentColor"/>',
     user: '<path d="M12 12a4 4 0 1 0-4-4 4 4 0 0 0 4 4zm0 2c-4 0-8 2-8 5v1h16v-1c0-3-4-5-8-5z" fill="currentColor"/>',
     search: '<path d="M10.5 4a6.5 6.5 0 1 1 0 13 6.5 6.5 0 0 1 0-13zm0 2a4.5 4.5 0 1 0 0 9 4.5 4.5 0 0 0 0-9z" fill="currentColor"/><path d="m15.2 14.1 4.2 4.2-1.4 1.4-4.2-4.2z" fill="currentColor"/>',
+    chart: '<path d="M4 19h16v2H4z" fill="currentColor"/><path d="M6 17V9h3v8H6zm5 0V5h3v12h-3zm5 0v-6h3v6h-3z" fill="currentColor"/>',
+    spark: '<path d="M12 2.5 13.7 8l5.8.3-4.5 3.6 1.5 5.6L12 14.8 6.5 17.5 8 11.9 3.5 8.3 9.3 8z" fill="currentColor"/>',
   };
   const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
   svg.setAttribute('viewBox', '0 0 24 24');
@@ -246,14 +258,18 @@ function renderShell() {
     ),
     h('main', { class: 'page' },
       state.tab === 'autos' ? renderAutosPage() :
+      state.tab === 'insights' ? renderInsightsPage() :
+      state.tab === 'assistant' ? renderAssistantPage() :
       state.tab === 'audit' ? renderAuditPage() :
       state.tab === 'sim' ? renderSimPage() :
       renderAccountPage()
     ),
     h('nav', { class: 'bottom-nav' },
       navBtn('autos', 'home', 'אוטומציות'),
+      navBtn('insights', 'chart', 'נתונים'),
+      navBtn('assistant', 'spark', 'העוזרת'),
       navBtn('audit', 'search', 'בדיקה'),
-      state.me.mockMode ? navBtn('sim', 'flask', 'סימולציה') : null,
+      state.me.showSimulation ? navBtn('sim', 'flask', 'סימולציה') : null,
       navBtn('account', 'user', 'חשבון'),
     ),
   );
@@ -281,6 +297,8 @@ function navBtn(id, ic, label) {
         loadLogs().catch(() => {});
         if (!state.audit && !state.auditLoading) runAudit().catch(() => {});
       }
+      if (id === 'insights') loadInsights().catch(() => {});
+      if (id === 'assistant') loadAssistant().catch(() => {});
       render();
     },
   }, icon(ic), label);
@@ -1062,6 +1080,491 @@ async function renderPendingPicker(pending) {
   }
   $app.replaceChildren(box);
 }
+
+
+
+const PARTNER_CATS = {
+  midwife: 'מיילדת',
+  doula: 'דולה',
+  lactation: 'יועצת הנקה',
+  pregnancy_photographer: 'צלמת הריון',
+  gynecologist: 'גניקולוגית',
+  baby_brand: 'מותג תינוקות',
+  podcast: 'פודקאסט',
+  hospital: 'מרכז לידה',
+  birth_educator: 'מדריכת הכנה ללידה',
+  other: 'אחר',
+};
+const PARTNER_STATUSES = { idea: 'רעיון', contacted: 'נוצר קשר', in_talks: 'בשיחה', done: 'הושלם' };
+const REQUEST_STATUSES = { new: 'חדשה', 'in-progress': 'בטיפול', done: 'הושלמה' };
+
+function fmtNum(n) {
+  if (n == null || n === '' || Number.isNaN(Number(n))) return '—';
+  return new Intl.NumberFormat('he-IL').format(Math.round(Number(n)));
+}
+function fmtDelta(d) {
+  if (d == null || Number.isNaN(Number(d))) return h('span', { class: 'delta flat' }, '—');
+  const n = Number(d);
+  const cls = n > 0 ? 'up' : n < 0 ? 'down' : 'flat';
+  const sign = n > 0 ? '+' : '';
+  return h('span', { class: 'delta ' + cls }, sign + n + '%');
+}
+function sparkline(values, color) {
+  const pts = (values || []).map((v) => (typeof v === 'number' ? v : Number(v?.value || 0)));
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('class', 'spark');
+  svg.setAttribute('viewBox', '0 0 100 28');
+  svg.setAttribute('preserveAspectRatio', 'none');
+  if (pts.length < 2) return svg;
+  const min = Math.min(...pts);
+  const max = Math.max(...pts);
+  const span = max - min || 1;
+  const d = pts.map((v, i) => {
+    const x = (i / (pts.length - 1)) * 100;
+    const y = 26 - ((v - min) / span) * 22;
+    return `${i ? 'L' : 'M'}${x.toFixed(1)},${y.toFixed(1)}`;
+  }).join(' ');
+  svg.innerHTML = `<path d="${d}" fill="none" stroke="${color || '#C45C7A'}" stroke-width="2" stroke-linecap="round"/>`;
+  return svg;
+}
+
+async function loadInsights() {
+  state.insightsLoading = true;
+  render();
+  try {
+    const days = state.insightsDays === 7 ? 7 : 30;
+    const [data, partners] = await Promise.all([
+      api('/api/insights?days=' + days),
+      api('/api/partners').catch(() => ({ partners: [] })),
+    ]);
+    state.insights = data;
+    state.partners = partners.partners || [];
+  } catch (err) {
+    state.toast = err.message || 'לא הצלחתי לטעון נתונים';
+  } finally {
+    state.insightsLoading = false;
+    render();
+  }
+}
+
+async function loadPartnersOnly() {
+  try {
+    const data = await api('/api/partners');
+    state.partners = data.partners || [];
+  } catch {}
+}
+
+function renderInsightsPage() {
+  const wrap = h('div', { class: 'insights' },
+    h('div', { class: 'ins-hero' },
+      h('div', { class: 'ins-kicker' }, 'המבט השבועי שלך'),
+      h('h2', {}, 'הנתונים שלך'),
+      h('p', {}, 'מה עובד, לאן הקהל זז, ואיך האוטומציות מביאות לידים — בלי רעש מיותר.'),
+      h('div', { class: 'seg' },
+        h('button', {
+          class: state.insightsDays === 7 ? 'active' : '',
+          onClick: async () => { state.insightsDays = 7; await loadInsights(); },
+        }, '7 ימים'),
+        h('button', {
+          class: state.insightsDays === 30 ? 'active' : '',
+          onClick: async () => { state.insightsDays = 30; await loadInsights(); },
+        }, '30 ימים'),
+      ),
+    ),
+  );
+  if (state.insightsLoading && !state.insights) {
+    wrap.append(h('p', { class: 'muted' }, 'טוענת נתונים…'));
+    return wrap;
+  }
+  const d = state.insights;
+  if (!d) {
+    wrap.append(h('div', { class: 'empty' },
+      h('h3', {}, 'עוד רגע'),
+      h('p', {}, 'לחצי כאן כדי לטעון את הנתונים.'),
+      h('button', { class: 'btn', onClick: () => loadInsights() }, 'להציג נתונים'),
+    ));
+    return wrap;
+  }
+  if (d.note) wrap.append(h('div', { class: 'note-soft' }, d.note));
+  wrap.append(renderTrends(d));
+  if (d.weekly_summary) wrap.append(renderWeeklyCard(d.weekly_summary));
+  wrap.append(renderWhatWorks(d.what_works || {}));
+  wrap.append(renderFunnels(d.funnels || []));
+  wrap.append(renderRecommendations(d.recommendations || []));
+  wrap.append(renderPartnersSection());
+  return wrap;
+}
+
+function renderWeeklyCard(summary) {
+  const p = summary.points || {};
+  const w = p.what_works || {};
+  const chips = [];
+  if (w.best_content_type?.label) chips.push(h('span', {}, 'סוג תוכן: ' + w.best_content_type.label));
+  (w.best_days || []).forEach((day) => chips.push(h('span', {}, 'יום ' + day.label)));
+  (w.best_hours || []).forEach((hh) => chips.push(h('span', {}, (hh.hour < 10 ? '0' : '') + hh.hour + ':00')));
+  return h('div', { class: 'summary-card' },
+    h('div', { class: 'ins-kicker' }, 'נשלח אלייך מדי יום ראשון'),
+    h('h3', {}, 'הסיכום השבועי'),
+    h('div', { class: 'summary-grid' },
+      h('div', { class: 'summary-point' }, h('div', { class: 'lbl' }, 'מה השתפר'), h('p', {}, p.improved || '—')),
+      h('div', { class: 'summary-point' }, h('div', { class: 'lbl' }, 'מה ירד'), h('p', {}, p.dropped || '—')),
+      h('div', { class: 'summary-point is-works' },
+        h('div', { class: 'lbl' }, 'מה עובד'),
+        h('p', {}, w.text || '—'),
+        chips.length ? h('div', { class: 'summary-chips' }, ...chips) : null,
+        (w.top_posts || []).length ? h('p', { style: { marginTop: '8px' } },
+          'מובילים: ' + w.top_posts.map((t) => (t.media_type_label || '') + ' «' + String(t.caption || '').slice(0, 32) + '»').join(', ')
+        ) : null,
+      ),
+      h('div', { class: 'summary-point' }, h('div', { class: 'lbl' }, 'המלצה'), h('p', {}, p.recommendation || '—')),
+    ),
+  );
+}
+
+function renderTrends(d) {
+  const t = d.trends || {};
+  const rate = t.engagement_rate?.current;
+  const tiles = [
+    { label: 'חשיפה', value: fmtNum(t.reach?.current), delta: t.reach?.delta, series: t.series?.reach },
+    { label: 'צפיות', value: fmtNum(t.views?.current), delta: t.views?.delta, series: t.series?.views },
+    { label: 'עוקבות', value: fmtNum(t.followers?.current ?? d.follower_count), delta: t.followers?.delta, extra: t.followers?.growth != null ? ((t.followers.growth > 0 ? '+' : '') + fmtNum(t.followers.growth)) : null },
+    { label: 'מעורבות', value: rate != null ? String(rate) + '%' : fmtNum(t.current?.engagement), delta: t.engagement_rate?.delta ?? t.deltas?.engagement },
+  ];
+  return h('section', { class: 'ins-section' },
+    h('h3', {}, 'מגמות'),
+    h('div', { class: 'metric-grid' },
+      ...tiles.map((tile) => h('div', { class: 'metric-tile' },
+        h('div', { class: 'lbl' }, tile.label),
+        h('div', { class: 'val' }, tile.value),
+        fmtDelta(tile.delta),
+        tile.extra ? h('div', { class: 'muted' }, 'שינוי: ' + tile.extra) : null,
+        sparkline(tile.series, '#C45C7A'),
+      )),
+    ),
+  );
+}
+
+function renderWhatWorks(w) {
+  const maxType = Math.max(1, ...(w.content_types || []).map((t) => t.engagement_per_post || 0));
+  const maxDay = Math.max(1, ...(w.days || []).map((d) => d.engagement_per_post || 0));
+  const bestDay = w.best_days && w.best_days[0] && w.best_days[0].weekday;
+  return h('section', { class: 'ins-section' },
+    h('h3', {}, 'מה עובד'),
+    h('div', { class: 'card' },
+      h('div', { class: 'ins-kicker' }, 'פוסטים ורילס מובילים'),
+      ...(w.top_posts || []).length
+        ? w.top_posts.map((post) => h('div', { class: 'top-post' },
+            post.thumbnail_url ? h('img', { src: post.thumbnail_url, alt: '' }) : h('div', { class: 'ph' }, post.media_type_label || ''),
+            h('div', {},
+              h('p', { class: 'cap' }, post.caption || 'פוסט'),
+              h('div', { class: 'meta' }, (post.media_type_label || '') + ' · ' + fmtNum(post.like_count) + ' לייקים · ' + fmtNum(post.comments_count) + ' תגובות'),
+            ),
+            h('div', { class: 'eng' }, fmtNum(post.engagement), h('small', {}, 'אינטראקציות')),
+          ))
+        : [h('p', { class: 'muted' }, 'עדיין אין מספיק פוסטים בתקופה הזו.')],
+    ),
+    (w.content_types || []).length ? h('div', { class: 'card' },
+      h('div', { class: 'ins-kicker' }, 'השוואת סוגי תוכן'),
+      ...w.content_types.map((t) => h('div', { class: 'type-row' },
+        h('span', {}, t.label),
+        h('div', { class: 'type-bar' }, h('i', { style: { width: Math.round((t.engagement_per_post / maxType) * 100) + '%' } })),
+        h('span', {}, fmtNum(t.engagement_per_post)),
+      )),
+    ) : null,
+    h('div', { class: 'card' },
+      h('div', { class: 'ins-kicker' }, 'הימים והשעות הכי חזקים'),
+      h('div', { class: 'day-row' },
+        ...(w.days || []).map((day) => h('div', { class: 'day-cell' },
+          h('div', { class: 'bar' + (day.weekday === bestDay ? ' is-best' : '') },
+            h('span', { style: { height: Math.max(6, Math.round((day.engagement_per_post / maxDay) * 52)) + 'px' } }),
+          ),
+          h('small', {}, ['א׳', 'ב׳', 'ג׳', 'ד׳', 'ה׳', 'ו׳', 'ש׳'][day.weekday] || day.label),
+        )),
+      ),
+      (w.best_hours || []).length ? h('p', { class: 'muted', style: { marginTop: '10px' } },
+        'שעות מומלצות: ' + w.best_hours.map((hh) => String(hh.hour).padStart(2, '0') + ':00').join(', ')
+      ) : null,
+    ),
+  );
+}
+
+function renderFunnels(funnels) {
+  return h('section', { class: 'ins-section' },
+    h('h3', {}, 'לידים מהאוטומציות'),
+    funnels.length ? funnels.map((f) => h('div', { class: 'card funnel-card' },
+      h('h4', {}, f.name || 'אוטומציה'),
+      h('p', { class: 'funnel-kw' }, f.keyword_mode === 'any' ? 'כל תגובה' : ('מילות מפתח: ' + (f.keywords || '—'))),
+      h('div', { class: 'funnel-steps' },
+        h('div', { class: 'funnel-step' }, h('b', {}, fmtNum(f.comments_matched)), h('span', {}, 'תגובות')),
+        h('div', { class: 'funnel-step' }, h('b', {}, fmtNum(f.sent)), h('span', {}, 'נשלחו')),
+        h('div', { class: 'funnel-step' }, h('b', {}, fmtNum(f.handled_by_owner)), h('span', {}, 'טופל ע״י רונה')),
+        h('div', { class: 'funnel-step' }, h('b', {}, fmtNum(f.converted)), h('span', {}, 'הושלמו')),
+      ),
+      h('div', { class: 'funnel-rate' }, 'שיעור השלמה: ' + (f.conversion_rate || 0) + '%'),
+    )) : h('p', { class: 'muted' }, 'כשתריצי אוטומציה, יופיע כאן משפך לידים — לכל מילת מפתח ולכל מטרה.'),
+  );
+}
+
+function renderRecommendations(recs) {
+  return h('section', { class: 'ins-section' },
+    h('h3', {}, 'המלצות השבוע'),
+    recs.length ? recs.map((r) => h('div', { class: 'rec-card' },
+      h('h4', {}, r.title),
+      h('p', {}, r.body),
+    )) : h('p', { class: 'muted' }, 'כשיהיו מספיק נתונים, יופיעו כאן שתיים-שלוש המלצות מעשיות.'),
+  );
+}
+
+function waLink(phone) {
+  const digits = String(phone || '').replace(/\D/g, '');
+  if (!digits) return '';
+  const intl = digits.startsWith('0') ? '972' + digits.slice(1) : digits;
+  return 'https://wa.me/' + intl;
+}
+
+function renderPartnersSection() {
+  return h('section', { class: 'ins-section' },
+    h('div', { class: 'page-head' },
+      h('h3', {}, 'שיתופי פעולה'),
+      h('button', { class: 'btn btn-sm btn-ghost', onClick: () => { state.partnerEditor = blankPartner(); render(); } }, 'הוספה'),
+    ),
+    h('p', { class: 'muted', style: { marginTop: '-8px' } }, 'רשימה שאפשר לערוך כאן. כפתורי יצירת הקשר נפתחים באפליקציה החיצונית — האפליקציה עצמה לא שולחת פניות.'),
+    state.partnerEditor ? renderPartnerEditor() : null,
+    ...(state.partners || []).map(renderPartnerCard),
+  );
+}
+
+function blankPartner() {
+  return { name: '', handle: '', category: 'doula', why_relevant: '', email: '', phone: '', website: '', status: 'idea', notes: '' };
+}
+
+function renderPartnerCard(p) {
+  const handle = (p.handle || '').replace(/^@/, '');
+  const links = [];
+  if (handle) links.push(h('a', { class: 'primary', href: 'https://ig.me/m/' + handle, target: '_blank', rel: 'noopener' }, 'הודעה באינסטגרם'));
+  if (p.email) links.push(h('a', { href: 'mailto:' + p.email }, 'אימייל'));
+  if (p.phone) links.push(h('a', { href: waLink(p.phone), target: '_blank', rel: 'noopener' }, 'וואטסאפ'));
+  if (p.website) links.push(h('a', { href: p.website, target: '_blank', rel: 'noopener' }, 'אתר'));
+  const en = p.enrichment || {};
+  return h('div', { class: 'card partner-card' },
+    h('div', { class: 'partner-top' },
+      h('div', {},
+        h('h4', {}, p.name, handle ? h('span', { class: 'handle', style: { marginRight: '6px', color: 'var(--muted)', fontWeight: '600' } }, ' @' + handle) : null),
+      ),
+      h('div', {},
+        h('span', { class: 'cat-pill' }, PARTNER_CATS[p.category] || p.category || 'אחר'),
+        ' ',
+        h('span', { class: 'status-pill status-' + (p.status || 'idea') }, PARTNER_STATUSES[p.status] || p.status || ''),
+      ),
+    ),
+    p.why_relevant ? h('p', { class: 'partner-why' }, p.why_relevant) : null,
+    (en.followers_count || en.biography) ? h('p', { class: 'partner-enrich' },
+      [en.followers_count != null ? fmtNum(en.followers_count) + ' עוקבות' : '', en.media_count != null ? fmtNum(en.media_count) + ' פוסטים' : '', en.biography || ''].filter(Boolean).join(' · ')
+    ) : null,
+    links.length ? h('div', { class: 'contact-row' }, ...links) : h('p', { class: 'muted' }, 'אין פרטי קשר ציבוריים שמורים.'),
+    h('div', { class: 'partner-actions' },
+      h('button', { class: 'btn btn-sm btn-ghost', onClick: () => { state.partnerEditor = { ...p }; render(); } }, 'עריכה'),
+      handle ? h('button', { class: 'btn btn-sm btn-ghost', onClick: () => enrichPartner(p) }, 'רענון פרופיל') : null,
+    ),
+  );
+}
+
+function renderPartnerEditor() {
+  const ed = state.partnerEditor;
+  const field = (key, label, opts = {}) => h('label', { class: 'field' },
+    h('span', {}, label),
+    opts.area
+      ? h('textarea', { value: ed[key] || '', onInput: (e) => { ed[key] = e.target.value; } })
+      : h('input', { type: opts.type || 'text', value: ed[key] || '', onInput: (e) => { ed[key] = e.target.value; } }),
+  );
+  return h('div', { class: 'card' },
+    h('h3', {}, ed.id ? 'עריכת שותפה' : 'שותפה חדשה'),
+    field('name', 'שם'),
+    field('handle', 'האנדל באינסטגרם'),
+    h('label', { class: 'field' }, h('span', {}, 'קטגוריה'),
+      h('select', { value: ed.category || 'other', onChange: (e) => { ed.category = e.target.value; } },
+        ...Object.entries(PARTNER_CATS).map(([k, v]) => h('option', { value: k }, v)),
+      ),
+    ),
+    field('why_relevant', 'למה זה רלוונטי', { area: true }),
+    field('email', 'אימייל', { type: 'email' }),
+    field('phone', 'טלפון / וואטסאפ'),
+    field('website', 'אתר'),
+    h('label', { class: 'field' }, h('span', {}, 'סטטוס'),
+      h('select', { value: ed.status || 'idea', onChange: (e) => { ed.status = e.target.value; } },
+        ...Object.entries(PARTNER_STATUSES).map(([k, v]) => h('option', { value: k }, v)),
+      ),
+    ),
+    field('notes', 'הערות', { area: true }),
+    h('div', { class: 'row-actions' },
+      h('button', { class: 'btn', onClick: savePartner }, 'שמירה'),
+      h('button', { class: 'btn btn-ghost', onClick: () => { state.partnerEditor = null; render(); } }, 'ביטול'),
+      ed.id ? h('button', { class: 'btn btn-ghost', style: { color: 'var(--danger)' }, onClick: () => deletePartner(ed) }, 'מחיקה') : null,
+    ),
+  );
+}
+
+async function savePartner() {
+  const ed = state.partnerEditor;
+  if (!ed || !String(ed.name || '').trim()) { state.toast = 'צריך שם'; render(); return; }
+  const body = { ...ed, handle: String(ed.handle || '').replace(/^@/, '') };
+  try {
+    if (ed.id) await api('/api/partners/' + ed.id, { method: 'PATCH', body });
+    else await api('/api/partners', { method: 'POST', body });
+    state.partnerEditor = null;
+    await loadPartnersOnly();
+    state.toast = 'נשמר';
+  } catch (err) {
+    state.toast = err.message || 'שמירה נכשלה';
+  }
+  render();
+}
+
+async function deletePartner(ed) {
+  if (!confirm('למחוק את «' + ed.name + '» מהרשימה?')) return;
+  await api('/api/partners/' + ed.id, { method: 'DELETE' });
+  state.partnerEditor = null;
+  await loadPartnersOnly();
+  render();
+}
+
+async function enrichPartner(p) {
+  try {
+    const data = await api('/api/partners/' + p.id + '/enrich', { method: 'POST' });
+    state.partners = (state.partners || []).map((x) => x.id === p.id ? data.partner : x);
+    state.toast = 'עודכן מפרופיל האינסטגרם (אם ההרשאה זמינה)';
+  } catch (err) {
+    state.toast = 'לא ניתן היה למשוך פרטים ציבוריים: ' + (err.message || '');
+  }
+  render();
+}
+
+async function loadAssistant() {
+  try {
+    const [chat, reqs] = await Promise.all([
+      api('/api/assistant/messages'),
+      api('/api/feature-requests').catch(() => ({ requests: [] })),
+    ]);
+    state.assistant = chat;
+    state.assistantMessages = chat.messages || [];
+    state.featureRequests = reqs.requests || [];
+  } catch (err) {
+    state.toast = err.message || 'לא הצלחתי לטעון את העוזרת';
+  }
+  render();
+}
+
+
+function assistantBannerText(st) {
+  const raw = st && (typeof st.banner === 'string' ? st.banner : (typeof st.message === 'string' ? st.message : ''));
+  if (String(raw).trim()) return String(raw).trim();
+  return st && st.llm_enabled
+    ? 'אפשר לדבר איתי חופשי. פעולות יופיעו לאישור לפני שינוי.'
+    : 'העוזרת החכמה תופעל במלואה בקרוב. בינתיים פעולות פשוטות כבר עובדות.';
+}
+
+function renderAssistantPage() {
+  const st = state.assistant || {};
+  const wrap = h('div', { class: 'assistant-page' },
+    h('div', { class: 'page-head' }, h('h2', {}, 'העוזרת שלך')),
+    h('div', { class: 'assistant-banner' + (st.llm_enabled ? ' ready' : '') },
+      assistantBannerText(st)
+    ),
+  );
+  const log = h('div', { class: 'chat-log' });
+  if (!(state.assistantMessages || []).length) {
+    log.append(h('div', { class: 'bubble assistant' },
+      'היי, אני כאן לעזור לך להתמצא בנתונים ובאוטומציות. אפשר לבקש למשל «מה עובד השבוע», «השהי את אוטומציית הקורס», או לכתוב בקשת שיפור לאפליקציה. שום דבר לא משתנה בלי שתלחצי אשרי.'
+    ));
+  }
+  for (const msg of state.assistantMessages || []) {
+    log.append(h('div', { class: 'bubble ' + (msg.role === 'user' ? 'user' : 'assistant') }, msg.content || ''));
+    for (const prop of msg.proposals || []) log.append(renderProposalCard(prop));
+  }
+  wrap.append(log);
+  wrap.append(h('form', {
+    class: 'chat-composer',
+    onSubmit: (e) => { e.preventDefault(); sendAssistant(); },
+  },
+    h('textarea', {
+      rows: 2,
+      placeholder: 'כתבי לי בעברית…',
+      value: state.assistantText,
+      onInput: (e) => { state.assistantText = e.target.value; },
+    }),
+    h('button', { class: 'btn btn-rose', disabled: !!state.assistantSending }, state.assistantSending ? '…' : 'שליחה'),
+  ));
+  if ((state.featureRequests || []).length) {
+    wrap.append(h('section', { class: 'ins-section', style: { marginTop: '18px' } },
+      h('h3', {}, 'בקשות שיפור'),
+      h('div', { class: 'card' },
+        ...state.featureRequests.map((r) => h('div', { class: 'req-item' },
+          h('h4', {}, r.title, ' ', h('span', { class: 'status-pill status-' + (r.status === 'done' ? 'done' : r.status === 'in-progress' ? 'in_talks' : 'idea') }, REQUEST_STATUSES[r.status] || r.status)),
+          h('p', {}, r.body),
+        )),
+      ),
+    ));
+  }
+  return wrap;
+}
+
+function renderProposalCard(prop) {
+  const pending = prop.status === 'pending';
+  return h('div', { class: 'proposal-card' },
+    h('div', { class: 'plabel' }, (prop.label || 'הצעת פעולה') + (pending ? '' : ' · ' + (prop.status === 'confirmed' ? 'אושר' : prop.status === 'cancelled' ? 'בוטל' : prop.status))),
+    h('p', {}, prop.summary || ''),
+    pending ? h('div', { class: 'proposal-actions' },
+      h('button', { class: 'btn btn-rose', onClick: () => resolveProposal(prop, 'confirm') }, 'אשרי'),
+      h('button', { class: 'btn btn-ghost', onClick: () => resolveProposal(prop, 'cancel') }, 'בטלי'),
+    ) : null,
+  );
+}
+
+async function sendAssistant() {
+  const text = String(state.assistantText || '').trim();
+  if (!text || state.assistantSending) return;
+  state.assistantSending = true;
+  state.assistantMessages = [...(state.assistantMessages || []), { role: 'user', content: text, proposals: [] }];
+  state.assistantText = '';
+  render();
+  try {
+    const res = await api('/api/assistant/chat', { method: 'POST', body: { text, history: state.assistantMessages.slice(-12) } });
+    state.assistant = { ...res, message: assistantBannerText(res), banner: assistantBannerText(res) };
+    state.assistantMessages = (state.assistantMessages || []).concat([{ role: 'assistant', content: res.reply, proposals: res.proposals || [] }]);
+    if (res.proposals && res.proposals.some((p) => p.action === 'create_feature_request')) {
+      /* list updates only after confirm */
+    }
+  } catch (err) {
+    state.toast = err.message || 'שליחה נכשלה';
+  } finally {
+    state.assistantSending = false;
+    render();
+    const log = document.querySelector('.chat-log');
+    if (log) log.scrollTop = log.scrollHeight;
+  }
+}
+
+async function resolveProposal(prop, kind) {
+  try {
+    const data = await api('/api/assistant/proposals/' + prop.id + '/' + (kind === 'confirm' ? 'confirm' : 'cancel'), { method: 'POST' });
+    const updated = data.proposal || prop;
+    state.assistantMessages = (state.assistantMessages || []).map((m) => ({
+      ...m,
+      proposals: (m.proposals || []).map((x) => x.id === prop.id ? { ...x, ...updated } : x),
+    }));
+    if (kind === 'confirm') {
+      state.toast = 'בוצע';
+      await loadAutos().catch(() => {});
+      const reqs = await api('/api/feature-requests').catch(() => ({ requests: [] }));
+      state.featureRequests = reqs.requests || [];
+      await loadPartnersOnly();
+    }
+  } catch (err) {
+    state.toast = err.message || 'הפעולה נכשלה';
+  }
+  render();
+}
+
 
 async function boot() {
   const params = new URLSearchParams(location.search);
