@@ -1,0 +1,26 @@
+{
+  "name": "rona-dm-manager",
+  "version": "1.0.0",
+  "private": true,
+  "description": "\u05d0\u05d5\u05d8\u05d5\u05de\u05e6\u05d9\u05d4 \u05dc\u05d0\u05d9\u05e0\u05e1\u05d8\u05d2\u05e8\u05dd: \u05ea\u05d2\u05d5\u05d1\u05d4 \u05dc\u05d4\u05e2\u05e8\u05d4 \u05d5\u05e9\u05dc\u05d9\u05d7\u05ea \u05d4\u05d5\u05d3\u05e2\u05d4 \u05d1\u05e4\u05e8\u05d8\u05d9",
+  "main": "src/index.js",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "test": "node --test tests/*.test.js",
+    "test:flow": "node scripts/test-mock-flow.js",
+    "postinstall": "node scripts/write-icons.js"
+  },
+  "dependencies": {
+    "cookie-parser": "^1.4.7",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "pg": "^8.23.1"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "^0.5.17"
+  }
+}

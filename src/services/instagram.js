@@ -1,0 +1,574 @@
+const { randomId } = require('../lib/signatures');
+
+const MOCK_MEDIA = [
+  {
+    id: 'mock_media_reel_cake',
+    caption: 'הכנה של העוגה האהובה 🍰 שמרו לכם!',
+    media_type: 'VIDEO',
+    media_product_type: 'REELS',
+    media_url: 'https://placehold.co/800x1000/f8c8d8/4a1c2b?text=Reel',
+    thumbnail_url: 'https://placehold.co/800x1000/f8c8d8/4a1c2b?text=Reel',
+    permalink: 'https://www.instagram.com/reel/mock_cake/',
+    timestamp: '2026-11-18T10:00:00+0000',
+    like_count: 128,
+    comments_count: 24,
+  },
+  {
+    id: 'mock_media_post_salad',
+    caption: 'מה אתן שמות לזה? 🥗 כתבו לי בתגובות',
+    media_type: 'IMAGE',
+    media_product_type: 'FEED',
+    media_url: 'https://placehold.co/800x800/d8f0e0/1c3a2a?text=Post',
+    thumbnail_url: 'https://placehold.co/800x800/d8f0e0/1c3a2a?text=Post',
+    permalink: 'https://www.instagram.com/p/mock_salad/',
+    timestamp: '2026-11-15T16:30:00+0000',
+    like_count: 86,
+    comments_count: 19,
+  },
+  {
+    id: 'mock_media_reel_morning',
+    caption: 'שגרת בוקר קלילה ☀️',
+    media_type: 'VIDEO',
+    media_product_type: 'REELS',
+    media_url: 'https://placehold.co/800x1000/ffe6c8/5a3a10?text=Morning',
+    thumbnail_url: 'https://placehold.co/800x1000/ffe6c8/5a3a10?text=Morning',
+    permalink: 'https://www.instagram.com/reel/mock_morning/',
+    timestamp: '2026-11-12T07:15:00+0000',
+    like_count: 204,
+    comments_count: 41,
+  },
+];
+
+function accountAuthMode(config, account) {
+  return account?.auth_mode || config.authMode || 'facebook';
+}
+
+function graphHost(config, account) {
+  return accountAuthMode(config, account) === 'instagram' ? 'graph.instagram.com' : 'graph.facebook.com';
+}
+
+function graphUrl(config, pathname, params, account) {
+  const u = new URL(`https://${graphHost(config, account)}/${config.meta.apiVersion}${pathname}`);
+  if (params) {
+    for (const [k, v] of Object.entries(params)) {
+      if (v !== undefined && v !== null) u.searchParams.set(k, v);
+    }
+  }
+  return u.toString();
+}
+
+function apiToken(account) {
+  return account?.page_access_token || account?.access_token;
+}
+
+function messagesPath(account) {
+  if (account?.page_id) return `/${account.page_id}/messages`;
+  return `/${account.ig_user_id}/messages`;
+}
+
+async function graphFetch(url, { method = 'GET', token, body } = {}) {
+  const headers = { Authorization: `Bearer ${token}` };
+  let payload;
+  if (body !== undefined) {
+    headers['Content-Type'] = 'application/json';
+    payload = JSON.stringify(body);
+  }
+  const res = await fetch(url, { method, headers, body: payload });
+  const text = await res.text();
+  let json;
+  try {
+    json = text ? JSON.parse(text) : {};
+  } catch {
+    json = { raw: text };
+  }
+  if (!res.ok) {
+    const err = new Error(json?.error?.message || `Graph API ${res.status}`);
+    err.status = res.status;
+    err.payload = json;
+    throw err;
+  }
+  return json;
+}
+
+function facebookRedirectUri(config) {
+  return `${config.appUrl}/auth/facebook/callback`;
+}
+
+function instagramRedirectUri(config) {
+  return `${config.appUrl}/auth/instagram/callback`;
+}
+
+function createInstagramClient({ config, db }) {
+  const mock = !!config.mockMode;
+
+  async function withAccount(account, fn, mockResult) {
+    if (mock) return mockResult();
+    if (!apiToken(account)) {
+      throw new Error('לחשבון אין אסימון גישה. התחברו מחדש.');
+    }
+    return fn(account);
+  }
+
+  return {
+    isMock: mock,
+    mockMedia: MOCK_MEDIA,
+    facebookRedirectUri: () => facebookRedirectUri(config),
+    instagramRedirectUri: () => instagramRedirectUri(config),
+
+    authorizationUrl({ state, redirectUri, mode }) {
+      const m = mode || config.authMode || 'facebook';
+      if (m === 'instagram') {
+        const u = new URL('https://www.instagram.com/oauth/authorize');
+        u.searchParams.set('client_id', config.meta.appId);
+        u.searchParams.set('redirect_uri', redirectUri || instagramRedirectUri(config));
+        u.searchParams.set('response_type', 'code');
+        u.searchParams.set('scope', config.meta.scopes.join(','));
+        u.searchParams.set('state', state);
+        return u.toString();
+      }
+      const u = new URL(`https://www.facebook.com/${config.meta.apiVersion}/dialog/oauth`);
+      u.searchParams.set('client_id', config.meta.appId);
+      u.searchParams.set('redirect_uri', redirectUri || facebookRedirectUri(config));
+      u.searchParams.set('response_type', 'code');
+      u.searchParams.set('state', state);
+      u.searchParams.set('prompt', 'login');
+      if (config.meta.configId) {
+        u.searchParams.set('config_id', config.meta.configId);
+      } else {
+        u.searchParams.set('scope', config.meta.scopes.join(','));
+      }
+      return u.toString();
+    },
+
+    async exchangeCode(code, redirectUri, mode) {
+      if (mock) throw new Error('exchangeCode is not used in mock mode');
+      const m = mode || config.authMode || 'facebook';
+      const clean = String(code).replace(/#_$/, '').replace(/#_+$/, '');
+      if (m === 'instagram') {
+        const form = new FormData();
+        form.set('client_id', config.meta.appId);
+        form.set('client_secret', config.meta.appSecret);
+        form.set('grant_type', 'authorization_code');
+        form.set('redirect_uri', redirectUri);
+        form.set('code', clean);
+        const res = await fetch('https://api.instagram.com/oauth/access_token', { method: 'POST', body: form });
+        const json = await res.json();
+        if (!res.ok) {
+          const err = new Error(json?.error_message || json?.error?.message || 'Token exchange failed');
+          err.payload = json;
+          throw err;
+        }
+        const item = Array.isArray(json.data) ? json.data[0] : json;
+        return {
+          accessToken: item.access_token,
+          userId: item.user_id ? String(item.user_id) : undefined,
+          permissions: item.permissions || '',
+          expiresIn: item.expires_in,
+        };
+      }
+      const url = new URL(`https://graph.facebook.com/${config.meta.apiVersion}/oauth/access_token`);
+      url.searchParams.set('client_id', config.meta.appId);
+      url.searchParams.set('client_secret', config.meta.appSecret);
+      url.searchParams.set('redirect_uri', redirectUri);
+      url.searchParams.set('code', clean);
+      const res = await fetch(url);
+      const json = await res.json();
+      if (!res.ok || json.error) {
+        const err = new Error(json?.error?.message || json?.error_message || 'Facebook token exchange failed');
+        err.payload = json;
+        throw err;
+      }
+      return {
+        accessToken: json.access_token,
+        userId: json.user_id ? String(json.user_id) : undefined,
+        tokenType: json.token_type,
+        expiresIn: json.expires_in,
+        permissions: json.permissions || '',
+      };
+    },
+
+    async exchangeLongLived(shortToken, mode) {
+      if (mock) return { accessToken: shortToken, expiresIn: 60 * 24 * 3600 };
+      const m = mode || config.authMode || 'facebook';
+      if (m === 'instagram') {
+        const url = new URL('https://graph.instagram.com/access_token');
+        url.searchParams.set('grant_type', 'ig_exchange_token');
+        url.searchParams.set('client_secret', config.meta.appSecret);
+        url.searchParams.set('access_token', shortToken);
+        const res = await fetch(url);
+        const json = await res.json();
+        if (!res.ok) {
+          const err = new Error(json?.error?.message || 'Long-lived token exchange failed');
+          err.payload = json;
+          throw err;
+        }
+        return { accessToken: json.access_token, expiresIn: json.expires_in, tokenType: json.token_type };
+      }
+      // Facebook user token → long-lived (~60 days). Page tokens minted from it do not expire.
+      // Business Integration System User tokens may already be long-lived; if this fails we keep the original.
+      const url = new URL(`https://graph.facebook.com/${config.meta.apiVersion}/oauth/access_token`);
+      url.searchParams.set('grant_type', 'fb_exchange_token');
+      url.searchParams.set('client_id', config.meta.appId);
+      url.searchParams.set('client_secret', config.meta.appSecret);
+      url.searchParams.set('fb_exchange_token', shortToken);
+      const res = await fetch(url);
+      const json = await res.json();
+      if (!res.ok || json.error) {
+        console.warn('[token] fb_exchange_token failed, keeping original token:', json?.error?.message || res.status);
+        return { accessToken: shortToken, expiresIn: null, alreadyLongLived: true };
+      }
+      return { accessToken: json.access_token, expiresIn: json.expires_in, tokenType: json.token_type };
+    },
+
+    async refreshLongLived(token, mode) {
+      if (mock) return { accessToken: token, expiresIn: 60 * 24 * 3600 };
+      const m = mode || config.authMode || 'facebook';
+      if (m !== 'instagram') {
+        throw new Error('Facebook Page tokens do not use ig_refresh_token');
+      }
+      const url = new URL('https://graph.instagram.com/refresh_access_token');
+      url.searchParams.set('grant_type', 'ig_refresh_token');
+      url.searchParams.set('access_token', token);
+      const res = await fetch(url);
+      const json = await res.json();
+      if (!res.ok) {
+        const err = new Error(json?.error?.message || 'Token refresh failed');
+        err.payload = json;
+        throw err;
+      }
+      return { accessToken: json.access_token, expiresIn: json.expires_in, tokenType: json.token_type };
+    },
+
+    async getMe(token, mode) {
+      if (mock) {
+        return {
+          id: 'mock_ig_rona',
+          username: 'rona_demo',
+          name: 'רונה',
+          profile_picture_url: '',
+          account_type: 'MEDIA_CREATOR',
+        };
+      }
+      const m = mode || config.authMode || 'facebook';
+      const host = m === 'instagram' ? 'graph.instagram.com' : 'graph.facebook.com';
+      const fields = m === 'instagram'
+        ? 'id,username,name,profile_picture_url,account_type'
+        : 'id,name,client_business_id';
+      return graphFetch(
+        `https://${host}/${config.meta.apiVersion}/me?fields=${fields}`,
+        { token }
+      );
+    },
+
+    /**
+     * Discover Instagram professional accounts after Facebook Login for Business.
+     * Primary path (Page-linked, as used by Rona): GET /me/accounts?fields=...,instagram_business_account
+     * Fallback (Unified Login system user token): GET /me/assigned_instagram_accounts
+     */
+    async listLinkedInstagramAccounts(userToken) {
+      const accounts = [];
+      let clientBusinessId = null;
+      let fbUserId = null;
+      try {
+        const me = await graphFetch(
+          graphUrl(config, '/me', { fields: 'id,name,client_business_id' }),
+          { token: userToken }
+        );
+        fbUserId = me.id || null;
+        clientBusinessId = me.client_business_id || null;
+      } catch (err) {
+        console.warn('[oauth] /me failed:', err.message);
+      }
+
+      try {
+        const pages = await graphFetch(
+          graphUrl(config, '/me/accounts', {
+            fields: 'id,name,access_token,instagram_business_account{id,username,name,profile_picture_url,account_type}',
+            limit: '100',
+          }),
+          { token: userToken }
+        );
+        for (const page of pages.data || []) {
+          const ig = page.instagram_business_account;
+          if (!ig?.id) continue;
+          accounts.push({
+            igUserId: String(ig.id),
+            username: ig.username,
+            name: ig.name,
+            profilePictureUrl: ig.profile_picture_url,
+            accountType: ig.account_type,
+            pageId: String(page.id),
+            pageName: page.name,
+            pageAccessToken: page.access_token,
+            tokenKind: 'page',
+          });
+        }
+      } catch (err) {
+        console.warn('[oauth] /me/accounts failed:', err.message);
+      }
+
+      if (!accounts.length) {
+        try {
+          const assigned = await graphFetch(
+            graphUrl(config, '/me/assigned_instagram_accounts', {
+              fields: 'id,username,name,profile_picture_url',
+            }),
+            { token: userToken }
+          );
+          for (const ig of assigned.data || []) {
+            accounts.push({
+              igUserId: String(ig.id),
+              username: ig.username,
+              name: ig.name,
+              profilePictureUrl: ig.profile_picture_url,
+              pageId: null,
+              pageName: null,
+              pageAccessToken: null,
+              tokenKind: 'system_user',
+            });
+          }
+        } catch (err) {
+          console.warn('[oauth] /me/assigned_instagram_accounts failed:', err.message);
+        }
+      }
+
+      return { accounts, clientBusinessId, fbUserId };
+    },
+
+    async subscribeWebhooks(account) {
+      if (mock) return { skipped: true };
+      const token = apiToken(account);
+      const out = { page: null, instagram: null, errors: [] };
+      if (account.page_id) {
+        try {
+          // Page subscriptions are required for some Instagram-on-Page notifications.
+          // subscribed_fields here must be a Page field (feed). Instagram fields are set in the App Dashboard.
+          out.page = await graphFetch(
+            graphUrl(config, `/${account.page_id}/subscribed_apps`, { subscribed_fields: 'feed' }, account),
+            { method: 'POST', token }
+          );
+        } catch (err) {
+          out.errors.push(`page subscribed_apps: ${err.message}`);
+          console.warn('[webhooks] page subscribed_apps:', err.message);
+        }
+      }
+      try {
+        out.instagram = await graphFetch(
+          graphUrl(
+            config,
+            `/${account.ig_user_id}/subscribed_apps`,
+            { subscribed_fields: 'comments,messages,messaging_postbacks' },
+            account
+          ),
+          { method: 'POST', token }
+        );
+      } catch (err) {
+        out.errors.push(`ig subscribed_apps: ${err.message}`);
+        console.warn('[webhooks] ig subscribed_apps:', err.message);
+      }
+      return out;
+    },
+
+    async listMedia(account) {
+      return withAccount(
+        account,
+        (acc) =>
+          graphFetch(
+            graphUrl(config, `/${acc.ig_user_id}/media`, {
+              fields:
+                'id,caption,media_type,media_product_type,media_url,thumbnail_url,permalink,timestamp,like_count,comments_count',
+              limit: '50',
+            }, acc),
+            { token: apiToken(acc) }
+          ).then((j) => j.data || []),
+        () => MOCK_MEDIA.map((m) => ({ ...m }))
+      );
+    },
+
+    async replyToComment(account, commentId, message) {
+      const payload = { type: 'comment_reply', comment_id: commentId, message };
+      if (mock) {
+        const result = { id: `mock_reply_${randomId(6)}`, mock: true, ...payload };
+        await db.logOutbound({ accountId: account.id, type: 'comment_reply', payload: result, mock: true });
+        return result;
+      }
+      const result = await graphFetch(
+        graphUrl(config, `/${commentId}/replies`, null, account),
+        { method: 'POST', token: apiToken(account), body: { message } }
+      );
+      await db.logOutbound({
+        accountId: account.id,
+        type: 'comment_reply',
+        payload: { comment_id: commentId, message, result },
+        mock: false,
+      });
+      return result;
+    },
+
+    /**
+     * Private Reply: recipient.comment_id, one per comment, within 7 days.
+     * Facebook Login / Page-linked: POST /{page-id}/messages with a Page access token.
+     * Unified Login fallback / Instagram Login: POST /{ig-user-id}/messages.
+     * Follow-up DMs use recipient.id (IGSID) within the 24h window.
+     */
+    async sendPrivateReply(account, { commentId, igsid, message, quickReplies }) {
+      const body = {
+        recipient: commentId ? { comment_id: commentId } : { id: igsid },
+        message: { text: message },
+      };
+      if (quickReplies?.length) {
+        body.message.quick_replies = quickReplies.map((q) => ({
+          content_type: 'text',
+          title: String(q.title).slice(0, 20),
+          payload: q.payload,
+        }));
+      }
+      if (mock) {
+        const result = {
+          recipient_id: igsid || `mock_igsid_${randomId(4)}`,
+          message_id: `mock_mid_${randomId(8)}`,
+          mock: true,
+          body,
+        };
+        await db.logOutbound({
+          accountId: account.id,
+          type: commentId ? 'private_reply' : 'dm',
+          payload: result,
+          mock: true,
+        });
+        return result;
+      }
+      const result = await graphFetch(
+        graphUrl(config, messagesPath(account), null, account),
+        { method: 'POST', token: apiToken(account), body }
+      );
+      await db.logOutbound({
+        accountId: account.id,
+        type: commentId ? 'private_reply' : 'dm',
+        payload: { path: messagesPath(account), body, result },
+        mock: false,
+      });
+      return result;
+    },
+
+    async sendGenericTemplate(account, { igsid, title, subtitle, buttonTitle, buttonUrl }) {
+      const body = {
+        recipient: { id: igsid },
+        message: {
+          attachment: {
+            type: 'template',
+            payload: {
+              template_type: 'generic',
+              elements: [
+                {
+                  title: title || 'קישור',
+                  subtitle: subtitle || undefined,
+                  buttons: [
+                    {
+                      type: 'web_url',
+                      url: buttonUrl,
+                      title: String(buttonTitle || 'לצפייה').slice(0, 20),
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        },
+      };
+      if (mock) {
+        const result = {
+          recipient_id: igsid,
+          message_id: `mock_mid_${randomId(8)}`,
+          mock: true,
+          body,
+        };
+        await db.logOutbound({ accountId: account.id, type: 'dm_template', payload: result, mock: true });
+        return result;
+      }
+      const result = await graphFetch(
+        graphUrl(config, messagesPath(account), null, account),
+        { method: 'POST', token: apiToken(account), body }
+      );
+      await db.logOutbound({
+        accountId: account.id,
+        type: 'dm_template',
+        payload: { path: messagesPath(account), body, result },
+        mock: false,
+      });
+      return result;
+    },
+
+    /**
+     * User Profile API: GET /{IGSID}?fields=is_user_follow_business
+     * On graph.facebook.com this requires a Page access token. Consent is usually
+     * granted only after the person has messaged the account (or tapped an icebreaker),
+     * so a comment alone may return "User consent is required".
+     * We only return false on an explicit negative; otherwise we allow.
+     */
+    async checkIsFollower(account, igsid, hint) {
+      if (hint === true || hint === false) return hint;
+      if (config.followCheckMode === 'stub' || mock) return true;
+      if (!igsid) return true;
+      try {
+        const profile = await graphFetch(
+          graphUrl(config, `/${igsid}`, { fields: 'is_user_follow_business,username' }, account),
+          { token: apiToken(account) }
+        );
+        if (profile && profile.is_user_follow_business === false) return false;
+        if (profile && profile.is_user_follow_business === true) return true;
+        return true;
+      } catch (err) {
+        console.warn('[follow-check] User Profile API failed, allowing by default:', err.message);
+        return true;
+      }
+    },
+  };
+}
+
+function expiresAtFromSeconds(expiresIn) {
+  if (expiresIn === null || expiresIn === undefined || expiresIn === '') return null;
+  const ms = Number(expiresIn) * 1000;
+  if (!Number.isFinite(ms) || ms <= 0) return null;
+  return new Date(Date.now() + ms).toISOString().replace('T', ' ').slice(0, 19);
+}
+
+function tokenAgeHours(account) {
+  if (!account.token_refreshed_at && !account.updated_at) return 999;
+  const t = Date.parse(String(account.token_refreshed_at || account.updated_at).replace(' ', 'T') + 'Z');
+  if (Number.isNaN(t)) return 999;
+  return (Date.now() - t) / 36e5;
+}
+
+async function refreshDueTokens({ config, db, instagram }) {
+  if (config.mockMode) return { refreshed: 0 };
+  const accounts = await db.listAccountsWithTokens();
+  let refreshed = 0;
+  for (const acc of accounts) {
+    try {
+      // Page tokens minted from a long-lived user token do not expire.
+      if (acc.auth_mode !== 'instagram' && (acc.page_access_token || acc.token_kind === 'page')) continue;
+      if (acc.auth_mode !== 'instagram') continue;
+      if (tokenAgeHours(acc) < 24) continue;
+      const result = await instagram.refreshLongLived(acc.access_token, 'instagram');
+      await db.updateAccountToken(acc.id, {
+        accessToken: result.accessToken,
+        tokenExpiresAt: expiresAtFromSeconds(result.expiresIn),
+      });
+      refreshed += 1;
+    } catch (err) {
+      console.warn(`[token-refresh] account ${acc.id} (@${acc.username}):`, err.message);
+    }
+  }
+  return { refreshed };
+}
+
+module.exports = {
+  createInstagramClient,
+  MOCK_MEDIA,
+  expiresAtFromSeconds,
+  refreshDueTokens,
+  apiToken,
+  messagesPath,
+  graphHost,
+};

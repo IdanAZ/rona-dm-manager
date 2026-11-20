@@ -1,0 +1,41 @@
+# Blueprint for Render (free web service + free Postgres).
+# Free web services spin down after idle time, so Instagram webhooks may be missed
+# until the service wakes. Free Render Postgres expires 30 days after creation
+# (plus a short grace period) — export/migrate before then or upgrade.
+services:
+  - type: web
+    name: rona-dm-manager
+    runtime: node
+    plan: free
+    buildCommand: npm ci
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: MOCK_MODE
+        value: "false"
+      - key: AUTH_MODE
+        value: facebook
+      - key: META_APP_ID
+        value: "1171722368541387"
+      - key: WEBHOOK_VERIFY_TOKEN
+        generateValue: true
+      - key: SESSION_SECRET
+        generateValue: true
+      - key: META_APP_SECRET
+        sync: false
+      - key: META_CONFIG_ID
+        sync: false
+      - key: APP_URL
+        sync: false
+      - key: DATABASE_URL
+        fromDatabase:
+          name: rona-dm-manager-db
+          property: connectionString
+
+databases:
+  - name: rona-dm-manager-db
+    plan: free
+    databaseName: rona_dm_manager
+    user: rona
